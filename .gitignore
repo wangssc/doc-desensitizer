@@ -1,0 +1,15 @@
+# Python
+__pycache__/
+*.pyc
+*.pyo
+
+# 打包产物
+build/
+dist/
+*.spec.bak
+
+# 运行输出（脱敏件、映射表、报告都落在这里，不能进版本库）
+out/
+
+# 日志
+*.log

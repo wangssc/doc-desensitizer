@@ -1,0 +1,634 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>文档脱敏工具</title>
+<style>
+  :root{
+    --bg:#f4f6f9; --card:#fff; --line:#e3e8ef; --ink:#1c2536; --sub:#5b6b82;
+    --brand:#1f3a5f; --brand2:#0b6bcb; --warn:#b45309; --danger:#b91c1c;
+    --ok:#0f7b4f;
+  }
+  *{box-sizing:border-box}
+  body{
+    margin:0; background:var(--bg); color:var(--ink);
+    font-family:"Microsoft YaHei","PingFang SC",-apple-system,system-ui,sans-serif;
+    font-size:14px; line-height:1.65;
+  }
+  header{
+    background:var(--brand); color:#fff; padding:16px 0;
+  }
+  .wrap{max-width:920px; margin:0 auto; padding:0 22px}
+  header .wrap{display:flex; align-items:baseline; gap:14px; flex-wrap:wrap}
+  header h1{font-size:19px; margin:0; font-weight:600; letter-spacing:.5px}
+  /* ---------- 断连遮罩 ---------- */
+.offline{position:fixed; inset:0; z-index:999; background:rgba(12,22,38,.82);
+  display:flex; align-items:center; justify-content:center; padding:24px;
+  backdrop-filter:blur(3px)}
+.offline.hidden{display:none}
+.offbox{max-width:460px; background:#fff; border-radius:14px; padding:28px 30px;
+  box-shadow:0 20px 60px rgba(0,0,0,.35)}
+.offbox h2{margin:0 0 14px; font-size:19px; color:#b3261e}
+.offbox p{margin:0 0 10px; font-size:14px; line-height:1.75; color:#2b3a4f}
+.offbox p.op{color:#0b4f8a; font-weight:600}
+.offbox p.sm{color:#7b8794; font-size:12.5px; margin-bottom:0}
+
+header .tag{font-size:12px; color:#a8c6e6}
+  header .tag::before{content:""; display:inline-block; width:1px; height:11px;
+    background:#4b6b8f; margin-right:14px; vertical-align:-1px}
+  main{padding:22px 0 60px}
+  .card{
+    background:var(--card); border:1px solid var(--line); border-radius:10px;
+    padding:20px; margin-bottom:16px; box-shadow:0 1px 3px rgba(20,40,70,.04);
+  }
+  .card h2{
+    font-size:14px; margin:0 0 14px; font-weight:600; color:var(--brand);
+    display:flex; align-items:center; gap:8px;
+  }
+  .card h2 .n{
+    display:inline-flex; width:20px; height:20px; border-radius:50%;
+    background:var(--brand); color:#fff; font-size:12px;
+    align-items:center; justify-content:center; font-weight:400;
+  }
+  .drop{
+    border:2px dashed #c3cfdd; border-radius:10px; padding:30px 20px;
+    text-align:center; cursor:pointer; transition:.15s; background:#fafcff;
+  }
+  .drop:hover{border-color:var(--brand2); background:#f3f8ff}
+  .drop.hot{border-color:var(--brand2); background:#eaf3ff}
+  .drop.reading{opacity:.55}
+  .drop .big{font-size:15px; color:var(--ink); margin-bottom:6px}
+  .drop .small{font-size:12px; color:var(--sub)}
+  .files{margin-top:12px}
+  .file{
+    display:flex; align-items:center; gap:10px; padding:8px 10px;
+    border:1px solid var(--line); border-radius:7px; margin-bottom:6px; background:#fcfdff;
+  }
+  .file .nm{flex:1; overflow:hidden; text-overflow:ellipsis; white-space:nowrap}
+  .file .sz{font-size:12px; color:var(--sub)}
+  .file .rm{
+    border:0; background:transparent; color:var(--sub); cursor:pointer;
+    font-size:16px; line-height:1; padding:2px 6px; border-radius:4px;
+  }
+  .file .rm:hover{background:#fdeaea; color:var(--danger)}
+  textarea{
+    width:100%; min-height:88px; padding:10px 12px; font-size:13px; line-height:1.6;
+    border:1px solid var(--line); border-radius:7px; resize:vertical;
+    font-family:"Consolas","Microsoft YaHei",monospace; background:#fcfdff;
+  }
+  textarea:focus, input:focus{outline:2px solid #cfe3fb; border-color:var(--brand2)}
+  .hint{font-size:12px; color:var(--sub); margin-top:6px}
+  .hint.warn{color:var(--warn)}
+  .row{display:flex; align-items:center; gap:12px; flex-wrap:wrap}
+  .btn{
+    border:1px solid var(--line); background:#fff; color:var(--ink);
+    padding:9px 18px; border-radius:7px; font-size:14px; cursor:pointer;
+    font-family:inherit; transition:.15s;
+  }
+  .btn:hover{background:#f2f6fb; border-color:#c3d3e6}
+  .btn.primary{
+    background:var(--brand2); border-color:var(--brand2); color:#fff; font-weight:600;
+    padding:11px 30px;
+  }
+  .btn.primary:hover{background:#0a5cb0}
+  .btn:disabled{opacity:.5; cursor:not-allowed}
+  .btn.ghost{font-size:13px; padding:6px 12px}
+  label.chk{display:flex; align-items:center; gap:7px; font-size:13px; color:var(--sub); cursor:pointer}
+  .tabs{display:flex; gap:4px; margin-bottom:16px}
+  .tab{
+    padding:8px 20px; border-radius:8px 8px 0 0; cursor:pointer; font-size:14px;
+    background:#e9eef5; color:var(--sub); border:1px solid var(--line); border-bottom:0;
+  }
+  .tab.on{background:#fff; color:var(--brand); font-weight:600}
+  .stats{display:flex; gap:12px; flex-wrap:wrap; margin-bottom:16px}
+  .stat{
+    flex:1; min-width:120px; background:#f7fafd; border:1px solid var(--line);
+    border-radius:8px; padding:12px 14px;
+  }
+  .stat .v{font-size:24px; font-weight:600; color:var(--brand2); line-height:1.2}
+  .stat .k{font-size:12px; color:var(--sub); margin-top:2px}
+  table{width:100%; border-collapse:collapse; font-size:13px}
+  th,td{text-align:left; padding:7px 10px; border-bottom:1px solid var(--line)}
+  th{background:#f7fafd; font-weight:600; color:var(--brand); font-size:12px}
+  td.mono{font-family:Consolas,monospace; color:var(--sub)}
+  .dl{
+    display:flex; gap:10px; flex-wrap:wrap; margin-top:14px;
+  }
+  .dl a{
+    display:inline-block; padding:9px 16px; border-radius:7px; text-decoration:none;
+    border:1px solid var(--brand2); color:var(--brand2); font-size:13px; background:#fff;
+  }
+  .dl a:hover{background:#eef6ff}
+  .dl a.safe{background:var(--brand2); color:#fff; border-color:var(--brand2)}
+  .dl a.danger{border-color:#f0b4b4; color:var(--danger); background:#fdf5f5}
+  .banner{
+    padding:11px 14px; border-radius:8px; font-size:13px; margin-bottom:14px;
+  }
+  .banner.ok{background:#eefaf3; border:1px solid #bfe6d2; color:#0d6b46}
+  .banner.warn{background:#fff8ec; border:1px solid #f3ddb5; color:var(--warn)}
+  .banner.err{background:#fdf1f1; border:1px solid #f2c9c9; color:var(--danger)}
+  .hidden{display:none}
+  .foot{font-size:12px; color:var(--sub); text-align:center; padding:10px 0 0}
+  /* 映射表外发警告：整份工具里后果最严重、又最容易被忽略的一条 */
+  .mapwarn{
+    display:flex; gap:11px; align-items:flex-start;
+    background:#fdf1f1; border:1px solid #f2c9c9; border-left:4px solid var(--danger);
+    border-radius:8px; padding:13px 16px; margin:16px 0 4px; color:#8f1d1d;
+  }
+  .mapwarn .ico{font-size:18px; line-height:1.3; flex:none}
+  .mapwarn p{margin:0}
+  .mapwarn .t{font-size:13.5px; font-weight:600; color:var(--danger)}
+  .mapwarn .s{font-size:12px; color:#9c3b3b; margin-top:5px}
+  .loading{display:inline-block; width:14px; height:14px; border:2px solid #cfe3fb;
+    border-top-color:var(--brand2); border-radius:50%; animation:spin .7s linear infinite;
+    vertical-align:-2px; margin-right:6px}
+  @keyframes spin{to{transform:rotate(360deg)}}
+</style>
+</head>
+<body>
+<div id="offline" class="offline hidden">
+  <div class="offbox">
+    <h2>服务已经停止</h2>
+    <p>启动器那个黑色窗口被关掉了，本地服务随之退出。</p>
+    <p class="op">重新双击 <b>文档脱敏工具</b> 快捷方式即可恢复，页面会自动刷新。</p>
+    <p class="sm">如果你还没关窗口，只是卡住了，等 3 秒会自动重连。</p>
+  </div>
+</div>
+<header>
+  <div class="wrap">
+    <h1>文档脱敏工具</h1>
+    <span class="tag">纯本地运行 · 不联网 · 不上传 · 关掉窗口即退出</span>
+  </div>
+</header>
+
+<main class="wrap">
+  <div class="tabs">
+    <div class="tab on" data-tab="scrub">脱敏</div>
+    <div class="tab" data-tab="restore">还原</div>
+  </div>
+
+  <!-- ============ 脱敏 ============ -->
+  <section id="pane-scrub">
+    <div class="card">
+      <h2><span class="n">1</span>选择资料</h2>
+      <div class="drop" id="drop">
+        <div class="big">把客户资料拖到这里，或点击选择</div>
+        <div class="small">支持 .docx / .txt / .md / .csv，可一次选多个</div>
+      </div>
+      <input type="file" id="picker" multiple accept=".docx,.txt,.md,.csv" class="hidden">
+      <div class="files" id="files"></div>
+      <div class="hint" id="dropHint"></div>
+      <div class="hint warn" id="sizeWarn"></div>
+    </div>
+
+    <div class="card">
+      <h2><span class="n">2</span>敏感词表<span style="font-weight:400;color:var(--sub);font-size:12px">（可选，一行一个）</span></h2>
+      <textarea id="words" placeholder="单位简称&#10;自建系统名&#10;特殊地名"></textarea>
+      <div class="hint warn">自动识别覆盖不到的词放这里。填了它，脱得最干净——尤其是裸地名和没有上下文的人名。</div>
+    </div>
+
+    <div class="card">
+      <h2><span class="n">3</span>开始</h2>
+      <div class="row" style="justify-content:space-between">
+        <div style="display:flex;flex-direction:column;gap:6px">
+          <label class="chk"><input type="checkbox" id="aggr"> 激进模式（连没有上下文的疑似人名也脱，误杀更多）</label>
+          <label class="chk"><input type="checkbox" id="stripimg"> 移除文档里的图片（Word 里的图脱不到，图上的 IP、系统名全留着）</label>
+        </div>
+        <div style="display:flex;flex-direction:column;align-items:flex-end;gap:4px">
+          <button class="btn primary" id="go">开 始 脱 敏</button>
+          <span class="hint" id="goProg" style="font-size:12px;min-height:16px"></span>
+        </div>
+      </div>
+    </div>
+
+    <div id="result" class="hidden"></div>
+  </section>
+
+  <!-- ============ 还原 ============ -->
+  <section id="pane-restore" class="hidden">
+    <div class="card">
+      <h2><span class="n">1</span>脱敏后的文件</h2>
+      <div class="drop" id="drop2">
+        <div class="big">把脱敏文件拖到这里，或点击选择</div>
+        <div class="small">还原后会生成「原名_还原」文件</div>
+      </div>
+      <input type="file" id="picker2" accept=".docx,.txt,.md,.csv" class="hidden">
+      <div class="files" id="files2"></div>
+    </div>
+    <div class="card">
+      <h2><span class="n">2</span>映射表 json</h2>
+      <div class="drop" id="drop3">
+        <div class="big">选择脱敏时生成的映射表</div>
+        <div class="small">文件名形如 映射表_1107_1030.json</div>
+      </div>
+      <input type="file" id="picker3" accept=".json" class="hidden">
+      <div class="files" id="files3"></div>
+      <div class="hint warn">还原后的文件等于原始资料，注意存放在哪台机器、哪个目录。</div>
+    </div>
+    <div class="card">
+      <div class="row" style="justify-content:flex-end">
+        <button class="btn primary" id="go2">开 始 还 原</button>
+      </div>
+    </div>
+    <div id="result2" class="hidden"></div>
+  </section>
+
+  <div class="mapwarn">
+    <div class="ico">⚠</div>
+    <div>
+      <p class="t">映射表里存的是原文，拿到它就能把脱敏件还原回去</p>
+      <p class="s">它和脱敏件一起发出去，等于没脱敏。对外只发带「_脱敏」的文件；
+        映射表只在需要还原时用，用完单独存放或删掉，别跟脱敏件放在同一个文件夹里。</p>
+    </div>
+  </div>
+</main>
+
+<script>
+const $ = s => document.querySelector(s);
+let files = [], rfile = null, rmap = null;
+
+/* ---------- 标签切换 ---------- */
+document.querySelectorAll('.tab').forEach(t => t.onclick = () => {
+  document.querySelectorAll('.tab').forEach(x => x.classList.toggle('on', x === t));
+  const k = t.dataset.tab;
+  $('#pane-scrub').classList.toggle('hidden', k !== 'scrub');
+  $('#pane-restore').classList.toggle('hidden', k !== 'restore');
+});
+
+/* ---------- 文件读取 ---------- */
+function readBase64(f){
+  return new Promise((ok, bad) => {
+    const r = new FileReader();
+    r.onload = () => ok(String(r.result).split(',')[1] || '');
+    r.onerror = () => bad(r.error);
+    r.readAsDataURL(f);
+  });
+}
+const fmt = n => n > 1048576 ? (n/1048576).toFixed(1)+' MB'
+             : n > 1024 ? (n/1024).toFixed(0)+' KB' : n+' B';
+
+/* ---------- 拖拽通用 ---------- */
+// 与后端 desensitize.py 一致：.txt/.md/.csv/.docx（第 805、815 行）
+const OK_EXT = ['.docx', '.txt', '.md', '.csv'];
+const extOk = n => OK_EXT.some(e => String(n).toLowerCase().endsWith(e));
+
+// readEntries 一次最多返回 100 项，返回空数组才算读完，必须循环
+function readAllEntries(reader){
+  return new Promise((resolve, reject) => {
+    const all = [];
+    const step = () => reader.readEntries(ents => {
+      if (!ents.length) return resolve(all);
+      all.push(...ents);
+      step();
+    }, reject);
+    step();
+  });
+}
+
+// 递归展开目录；子目录也要进
+async function collectEntry(entry, out, skipped){
+  if (!entry) return;
+  if (entry.isFile) {
+    const f = await new Promise((res, rej) => entry.file(res, rej));
+    if (extOk(f.name)) out.push(f); else skipped.push(f.name);
+    return;
+  }
+  if (entry.isDirectory) {
+    const ents = await readAllEntries(entry.createReader());
+    for (const e of ents) await collectEntry(e, out, skipped);
+  }
+}
+
+function wireDrop(dropEl, inputEl, onFiles){
+  dropEl.onclick = () => inputEl.click();
+  inputEl.onchange = () => {
+    if (inputEl.files.length) {
+      const out = [], skipped = [];
+      [...inputEl.files].forEach(f => extOk(f.name) ? out.push(f) : skipped.push(f.name));
+      onFiles(out, skipped);
+      inputEl.value = '';
+    }
+  };
+  ['dragenter','dragover'].forEach(e => dropEl.addEventListener(e, ev => {
+    ev.preventDefault(); dropEl.classList.add('hot');
+  }));
+  ['dragleave','drop'].forEach(e => dropEl.addEventListener(e, ev => {
+    ev.preventDefault(); dropEl.classList.remove('hot');
+  }));
+  dropEl.addEventListener('drop', async ev => {
+    ev.preventDefault();
+    // dataTransfer.items 只在事件处理期间有效，必须先把 entry 同步取出来，再异步递归
+    const entries = [];
+    const items = ev.dataTransfer.items;
+    if (items && items.length) {
+      for (const it of items) {
+        const e = it.webkitGetAsEntry && it.webkitGetAsEntry();
+        if (e) entries.push(e);
+      }
+    }
+    const out = [], skipped = [];
+    if (entries.length) {
+      dropEl.classList.add('reading');
+      try {
+        for (const e of entries) await collectEntry(e, out, skipped);
+      } finally {
+        dropEl.classList.remove('reading');
+      }
+    } else {
+      // 不支持 entry API 时兜底：目录在这里读不出来，但普通文件仍可用
+      for (const f of [...ev.dataTransfer.files]) {
+        extOk(f.name) ? out.push(f) : skipped.push(f.name);
+      }
+    }
+    if (out.length || skipped.length) onFiles(out, skipped);
+  });
+}
+
+/* ---------- 脱敏：文件列表 ---------- */
+// 阈值和超时线都从服务端 /api/config 读，不在页面里写死——
+// 引擎提速或换机器时改服务端一处即可，不用人肉同步两处。
+// 读不到就退回下面这套默认值：接口失败不能让功能不可用。
+const HARD = 60 * 1024 * 1024;   // 浏览器侧硬上限（base64 后放大会卡死页面），与后端能力无关
+const CFG = { warn_mb: 5, max_free_mb: 5, timeout_base_s: 120, timeout_per_mb_s: 12, engine_version: "" };
+fetch('/api/config').then(r => r.json()).then(c => {
+  Object.assign(CFG, c);
+  updateSizeWarn();   // 阈值可能变了，按当前已选文件重判一次
+}).catch(() => { /* 保持默认值 */ });
+
+function updateSizeWarn(){
+  const el = $('#sizeWarn');
+  if (!el) return;
+  const warnBytes = CFG.warn_mb * 1024 * 1024;
+  const total = files.reduce((s, f) => s + f.size, 0);
+  if (total > HARD) {
+    el.textContent = `这批文件共 ${fmt(total)}，超过单次上限 ${fmt(HARD)}，点开始会直接报错。请分批处理。`;
+    el.style.display = '';
+  } else if (total > warnBytes) {
+    el.textContent = `这批文件共 ${fmt(total)}，文件较大，建议拆分成每批 ${CFG.warn_mb} MB 以内再处理`
+      + '——体积越大等得越久，时间没法预估。';
+    el.style.display = '';
+  } else {
+    el.textContent = '';
+    el.style.display = 'none';
+  }
+}
+
+function renderFiles(){
+  $('#files').innerHTML = files.map((f,i) => `
+    <div class="file">
+      <span class="nm">${esc(f.name)}</span>
+      <span class="sz">${fmt(f.size)}</span>
+      <button class="rm" data-i="${i}" title="移除">×</button>
+    </div>`).join('');
+  $('#files').querySelectorAll('.rm').forEach(b => b.onclick = () => {
+    files.splice(+b.dataset.i, 1); renderFiles();
+  });
+  updateSizeWarn();
+}
+const esc = s => String(s).replace(/[&<>"']/g, c =>
+  ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
+
+wireDrop($('#drop'), $('#picker'), (fs, skipped) => {
+  fs.forEach(f => { if (!files.some(x => x.name === f.name)) files.push(f); });
+  renderFiles();
+  const n = (skipped || []).length;
+  const el = $('#dropHint');
+  if (el) {
+    el.textContent = files.length
+      ? `已选 ${files.length} 个文件` + (n ? `（跳过 ${n} 个不支持的类型）` : '')
+      : (n ? `没有可处理的文件，已跳过 ${n} 个不支持的类型` : '');
+    el.className = 'hint' + (n ? ' warn' : '');
+  }
+});
+
+/* ---------- 还原：两个文件位 ---------- */
+function wireSingle(dropEl, inputEl, boxEl, which){
+  wireDrop(dropEl, inputEl, (fs, skipped) => {
+    const f = fs[0];
+    if (!f) {
+      boxEl.innerHTML = `<div class="hint warn">没有可用的文件（支持 .docx / .txt / .md / .csv）</div>`;
+      return;
+    }
+    if (which === 'file') rfile = f; else rmap = f;
+    boxEl.innerHTML = `<div class="file"><span class="nm">${esc(f.name)}</span>
+      <span class="sz">${fmt(f.size)}</span></div>`;
+  });
+}
+wireSingle($('#drop2'), $('#picker2'), $('#files2'), 'file');
+wireSingle($('#drop3'), $('#picker3'), $('#files3'), 'map');
+
+/* ---------- 执行脱敏 ---------- */
+$('#go').onclick = async () => {
+  if (!files.length) { alert('先选文件。'); return; }
+  const totalBytes = files.reduce((s, f) => s + f.size, 0);
+  const totalMB = totalBytes / 1048576;
+
+  // base64 会让体积再涨三分之一，且是一次性 JSON 提交，太大浏览器会卡死。
+  if (totalBytes > HARD) {
+    alert(`这批文件共 ${fmt(totalBytes)}，超过单次上限 ${fmt(HARD)}。`
+      + '请分批处理——base64 编码后会再放大三分之一，一次性提交会让页面卡住。');
+    return;
+  }
+
+  // 超过阈值不偷偷放宽超时，先问一次。
+  // 用户不知道要等多久时，"还在跑"和"已经卡死"是同一件事，静默等 200 秒体验更差。
+  let timeoutMs = CFG.timeout_base_s * 1000;
+  if (totalMB > CFG.max_free_mb) {
+    // 参考区间按实测给的保守带宽：真实方案约 1 s/MB，极端样本约 3 s/MB。
+    // 不要说成 "MB × 12 秒"，那是超时上限，不是预计耗时——拿它当预估会把人吓跑。
+    const lo = Math.max(1, Math.ceil(totalMB * 1));
+    const hi = Math.ceil(totalMB * 3);
+    const capSec = Math.max(CFG.timeout_base_s, Math.ceil(totalMB * CFG.timeout_per_mb_s));
+    const body =
+      `这批文件 ${totalMB.toFixed(1)} MB，参考耗时 ${lo}～${hi} 秒`
+      + `（实际取决于里面有多少敏感信息要替换）。\n\n`
+      + (capSec > CFG.timeout_base_s
+        ? `界面默认只等 ${CFG.timeout_base_s} 秒，这个体积可能不够；点「确定」会把上限放宽到 ${capSec} 秒。\n\n`
+        : `界面默认等 ${CFG.timeout_base_s} 秒，这个体积够用。\n\n`)
+      + `点「确定」开始；点「取消」回去拆小一点再传（拆开还能顺便缩小出错的排查范围）。`;
+    if (!confirm(body)) return;
+    timeoutMs = capSec * 1000;
+  }
+
+  const btn = $('#go');
+  const prevHtml = btn.innerHTML;
+  btn.disabled = true;
+  btn.innerHTML = '<span class="loading"></span>正在处理…';
+  const progEl = $('#goProg');
+  const setProg = t => { if (progEl) progEl.textContent = t; };
+  // 整份文件 base64 后一次性 POST，几十 MB 会静默卡很久；到点没回就主动断，别让人对着死界面等
+  const ac = new AbortController();
+  const timer = setTimeout(() => ac.abort(), timeoutMs);
+  try {
+    const payload = { files: [], words: $('#words').value, aggressive: $('#aggr').checked,
+                      stripImages: $('#stripimg').checked };
+    for (let i = 0; i < files.length; i++) {
+      const f = files[i];
+      setProg(`读取 ${i + 1}/${files.length}：${f.name}`);
+      payload.files.push({ name: f.name, data: await readBase64(f) });
+    }
+    setProg(`已提交 ${files.length} 个文件（${fmt(totalBytes)}），等后端处理…`);
+    const r = await fetch('/api/scrub', {
+      method: 'POST', headers: {'Content-Type':'application/json'},
+      body: JSON.stringify(payload), signal: ac.signal
+    });
+    const d = await r.json();
+    if (!d.ok) throw new Error(d.error || '处理失败');
+    renderResult(d);
+  } catch (e) {
+    const msg = (e && e.name === 'AbortError')
+      ? `处理超时（${Math.round(timeoutMs / 1000)} 秒未返回）。文件太大时请分批处理，或检查后台进程是否卡住。`
+      : (e.message || String(e));
+    $('#result').classList.remove('hidden');
+    $('#result').innerHTML = `<div class="banner err">出错了：${esc(msg)}</div>`;
+  } finally {
+    clearTimeout(timer);
+    btn.disabled = false;
+    btn.innerHTML = prevHtml;
+    setProg('');
+  }
+};
+
+function renderResult(d){
+  const okBanner = d.high > 0
+    ? `<div class="banner warn">已完成，但有 <b>${d.high}</b> 条高置信残留（机构名或地名）。
+       把对应词加进敏感词表再跑一次，或人工核对报告第四节。</div>`
+    : `<div class="banner ok">已完成，未发现高置信残留。可以直接把「_脱敏」文件发出去。</div>`;
+
+  const statRows = Object.entries(d.stat || {}).sort((a,b) => b[1]-a[1])
+    .map(([k,v]) => `<tr><td>${esc(k)}</td><td class="mono">${v}</td></tr>`).join('');
+
+  const riskRows = (d.risks || []).map(r => `<tr>
+      <td>${esc(r.file)}</td><td>${esc(r.kind)}</td>
+      <td class="mono">${r.line}</td><td class="mono">${esc(r.frag)}</td></tr>`).join('');
+
+  const dl = (d.files || []).filter(f => f.out).map(f =>
+    `<a class="safe" href="/dl?d=${encodeURIComponent(d.batch)}&f=${encodeURIComponent(f.out)}">下载 ${esc(f.out)}</a>`).join('');
+
+  $('#result').classList.remove('hidden');
+  $('#result').innerHTML = `
+    ${okBanner}
+    <div class="card">
+      <h2>处理结果</h2>
+      <div class="stats">
+        <div class="stat"><div class="v">${d.total}</div><div class="k">替换总处数</div></div>
+        <div class="stat"><div class="v">${(d.files||[]).length}</div><div class="k">处理文件数</div></div>
+        <div class="stat"><div class="v">${d.riskTotal||0}</div><div class="k">残留提示</div></div>
+      </div>
+      <div class="dl">${dl}
+        <a href="/dl?d=${encodeURIComponent(d.batch)}&f=${encodeURIComponent(d.report)}">下载脱敏报告</a>
+        <button class="btn ghost" onclick="openDir()">打开输出目录</button>
+      </div>
+      <div class="hint">输出目录：<span class="mono">${esc(d.dir)}</span></div>
+    </div>
+    <div class="card">
+      <h2>各类别命中</h2>
+      <table style="width:auto;min-width:300px"><thead><tr><th>类别</th><th>数量</th></tr></thead><tbody>${statRows}</tbody></table>
+    </div>
+    ${riskRows ? `<div class="card">
+      <h2>残留风险（需人工复核）</h2>
+      <table><thead><tr><th>文件</th><th>类型</th><th>行号</th><th>遮蔽片段</th></tr></thead>
+      <tbody>${riskRows}</tbody></table>
+      <div class="hint">遮蔽片段保留首尾字符以便定位，中间以 * 代替，不代表片段全文安全。</div>
+    </div>` : ''}
+    ${(d.media && d.media.length) ? `<div class="card" style="border-color:#f0b4b4;background:#fdfafa">
+      <h2 style="color:var(--danger)">图片（${d.media[0].mode === 'strip' ? '已删除' : '未处理'}）</h2>
+      <div class="hint warn">${d.media[0].mode === 'strip'
+        ? '图片和正文里的图片节点已整块删除。客户需要图的话，另行提供重绘版。'
+        : '这些图原样保留在文档里。图片是按字节复制的，文本脱敏碰不到——拓扑图上的 IP 和系统名、配置截图上的域名和账号，全在图里。外发前逐张看清楚，或者勾选「移除文档里的图片」重跑一次。'}</div>
+      <table style="margin-top:10px"><thead><tr><th>文件</th><th>图片</th><th>大小</th></tr></thead>
+      <tbody>${d.media.map(m => `<tr><td>${esc(m.file)}</td><td class="mono">${esc(m.name)}</td><td class="mono">${(m.size/1024).toFixed(0)} KB</td></tr>`).join('')}</tbody></table>
+    </div>` : ''}
+    <div class="card" style="border-color:#f0b4b4;background:#fdfafa">
+      <h2 style="color:var(--danger)">映射表（仅本机，切勿外发）</h2>
+      <div class="hint warn">这个文件含全部原文。它只在你要还原时用得上，任何情况下都不要发给别人、不要上传网盘。</div>
+      <div class="dl" style="margin-top:10px">
+        <a class="danger" href="/dl?d=${encodeURIComponent(d.batch)}&f=${encodeURIComponent(d.mapfile)}">下载映射表</a>
+      </div>
+    </div>`;
+  window.scrollTo({top: 0, behavior: 'smooth'});
+}
+
+async function openDir(){
+  await fetch('/api/opendir', {method:'POST', headers:{'Content-Type':'application/json'}, body:'{}'});
+}
+
+/* ---------- 演示模式：便于自检界面与给别人看效果 ---------- */
+if (location.hash === '#demo') {
+  renderResult({
+    total: 60, riskTotal: 3, high: 1, code: 2,
+    dir: '脱敏输出\\gui_20240101_000000',
+    batch: 'gui_20240101_000000',
+    files: [{name:'客户方案.docx', out:'客户方案_脱敏.docx', count:45}],
+    mapfile: '映射表_20240101_000000.json', report: '脱敏报告_20240101_000000.md',
+    stat: {IP:10, 型号:7, 单位:6, 编号:5, 人员:5, 电话:3, 地址:2, 账号:2,
+           域名:2, 路径:1, 邮箱:1, 证件号:1},
+    risks: [
+      {file:'客户方案.docx', kind:'疑似地名残留', line:12, frag:'高*区'},
+      {file:'客户方案.docx', kind:'疑似机构名（未命中后缀规则）', line:31, frag:'某*分部'},
+      {file:'客户方案.docx', kind:'疑似人名（误报较多，需人工确认）', line:47, frag:'张*'}
+    ]
+  });
+}
+
+$('#go2').onclick = async () => {
+  if (!rfile) { alert('先选脱敏文件。'); return; }
+  if (!rmap) { alert('先选映射表。'); return; }
+  const btn = $('#go2');
+  btn.disabled = true;
+  btn.innerHTML = '<span class="loading"></span>正在还原…';
+  try {
+    const mapText = await rmap.text();
+    const mapJson = JSON.parse(mapText);
+    const payload = {
+      name: rfile.name,
+      data: await readBase64(rfile),
+      pairs: mapJson.pairs || []
+    };
+    const r = await fetch('/api/restore', {
+      method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify(payload)
+    });
+    const d = await r.json();
+    if (!d.ok) throw new Error(d.error || '还原失败');
+    $('#result2').classList.remove('hidden');
+    $('#result2').innerHTML = `
+      <div class="banner ok">还原完成。</div>
+      <div class="card">
+        <div class="dl"><a class="safe" href="/dl?d=${encodeURIComponent(d.batch)}&f=${encodeURIComponent(d.out)}">下载 ${esc(d.out)}</a>
+        <button class="btn ghost" onclick="openDir()">打开输出目录</button></div>
+        <div class="hint">输出目录：<span class="mono">${esc(d.dir)}</span></div>
+      </div>`;
+  } catch (e) {
+    $('#result2').classList.remove('hidden');
+    $('#result2').innerHTML = `<div class="banner err">出错了：${esc(e.message)}</div>`;
+  } finally {
+    btn.disabled = false;
+    btn.textContent = '开 始 还 原';
+  }
+};
+
+/* ---------- 服务存活检测：黑窗口一关，页面立刻说清楚，不让你瞎点 ---------- */
+(function watchdog(){
+  let dead = 0;
+  const box = () => document.getElementById('offline');
+  async function tick(){
+    try {
+      const r = await fetch('/api/ping', {cache:'no-store'});
+      if (!r.ok) throw new Error('bad');
+      if (!box().classList.contains('hidden')) {
+        box().classList.add('hidden');
+        location.reload();
+      }
+      dead = 0;
+    } catch (e) {
+      dead++;
+      if (dead >= 2) box().classList.remove('hidden');
+    }
+  }
+  setInterval(tick, 3000);
+  tick();
+})();
+</script>
+</body>
+</html>
