@@ -11,9 +11,19 @@ Runs entirely on your machine. No network, no upload, no account.
 ## What it does
 
 Reads a `.docx` / `.txt` / `.md` / `.csv` and swaps identifying details for
-`[type + number]` tokens: person names, organisation names, place names, IPs,
-phone numbers, email addresses, account names, ID numbers, device models,
-domains and file paths.
+`[type + number]` tokens across **17 categories**: person names, organisation
+names, system/platform names, vendors, products, addresses (merged with postal
+codes), postal codes, IPs, phone numbers, email addresses, account names, ID
+numbers, domains, file paths, device models, document numbers and unclassified
+entities.
+
+Vendors and products are their own categories — 深信服 becomes `[厂商1]`, not
+`[单位1]`. Dates are replaced with `[日期N]` only when the clause contains a
+locator such as birth, hire or contract signing; report dates, assessment
+periods, certificate validity and personnel qualification dates are kept as-is.
+A protection whitelist keeps common words (通过 / 符合 / 重要 / 部署 …) out of the
+replacement. There is no `[自定义N]` fallback any more: anything that cannot be
+classified becomes `[未分类N]` and is listed in its own report section.
 
 The same original always maps to the same placeholder, so the text still reads
 coherently.
@@ -44,12 +54,11 @@ This section matters more than the one above.
   stamps that only exist as pixels are not touched. For docx you can delete the
   images outright (`--images strip`, safest) or keep them — the report then
   lists them so a human can look.
-- **Names ending in 「平台」 (platform) are not replaced automatically.**
-  Organisation names are matched from a suffix list (company, group, hospital,
-  university, bank, research institute …) with no entry for platform. Rather
-  than guess — which would wreck generic phrases like 「云平台」 — any such name
-  carrying a province/city/district prefix is listed under residual risks in the
-  report. Add the full name to a custom word list and re-run.
+- **Only cloud platform names with an administrative prefix are recognised.**
+  「××省/市××政务云（××节点）」 is replaced as a whole `[系统N]`; bare generic
+  phrases like 「云平台」 are left alone. Long system names that repeat
+  throughout the document (≥3 times) are matched as whole entities first, so you
+  never get "half placeholder + half original text".
 - **No semantic understanding.** It matches patterns. Generic references like
   「某部门」 are left alone, and a technical term that looks like a person name
   can be caught by mistake (more so in aggressive mode).

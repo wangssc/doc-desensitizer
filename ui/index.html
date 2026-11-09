@@ -606,6 +606,11 @@ function renderResult(d){
       <td>${esc(r.file)}</td><td>${esc(r.kind)}</td>
       <td class="mono">${r.line}</td><td class="mono">${esc(r.frag)}</td></tr>`).join('');
 
+  /* 可读性回检：只报机械特征（占位符被拆进词里），不阻断，红字列出 */
+  const rdRows = (d.readability || []).map(r => `<tr>
+      <td>${esc(r.file)}</td><td>${esc(r.kind)}</td>
+      <td class="mono">${r.line}</td><td class="mono">${esc(r.frag)}</td></tr>`).join('');
+
   const dl = (d.files || []).filter(f => f.out).map(f =>
     `<a class="safe" href="/dl?d=${encodeURIComponent(d.batch)}&f=${encodeURIComponent(f.out)}">下载 ${esc(f.out)}</a>`).join('');
 
@@ -685,6 +690,15 @@ function renderResult(d){
       <table><thead><tr><th>文件</th><th>类型</th><th>行号</th><th>遮蔽片段</th></tr></thead>
       <tbody>${riskRows}</tbody></table>
       <div class="hint">遮蔽片段保留首尾字符以便定位，中间以 * 代替，不代表片段全文安全。</div>
+    </div>` : ''}
+    ${rdRows ? `<div class="card" style="border-color:#f0b4b4;background:#fdfafa">
+      <h2 style="color:var(--danger)">疑似误伤（${d.readabilityTotal || rdRows.length} 处，需人工确认）</h2>
+      <div class="hint warn">这些位置像是把词拆开了，比如 <span class="mono">深[单位1]服</span>。
+        工具不判断通顺，只按字符位置报出来——请对照脱敏文件看一眼：确认拆坏了就人工改回来，
+        确认是正常替换（占位符前后本来就是普通汉字）就忽略这一条。</div>
+      <table style="margin-top:10px"><thead><tr><th>文件</th><th>现象</th><th>行号</th><th>片段</th></tr></thead>
+      <tbody>${rdRows}</tbody></table>
+      <div class="hint">片段只含占位符和紧邻的 1 个字符，不含原文。</div>
     </div>` : ''}
     ${(d.media && d.media.length) ? `<div class="card" style="border-color:#f0b4b4;background:#fdfafa">
       <h2 style="color:var(--danger)">图片（${d.media[0].mode === 'strip' ? '已删除' : '未处理'}）</h2>
@@ -852,6 +866,11 @@ if (location.hash === '#demo') {
     review: {checked: 27, total: 0, hits: []},
     stat: {IP:10, 型号:7, 单位:6, 编号:5, 人员:5, 电话:3, 地址:2, 账号:2,
            域名:2, 路径:1, 邮箱:1, 证件号:1},
+    readability: [
+      {file:'客户方案.docx', kind:'占位符被拆在词中间', line:12, frag:'深[单位1]服'},
+      {file:'客户方案.docx', kind:'占位符紧贴中文标点', line:18, frag:'，[厂商1]'}
+    ],
+    readabilityTotal: 2,
     risks: [
       {file:'客户方案.docx', kind:'疑似地名残留', line:12, frag:'高*区'},
       {file:'客户方案.docx', kind:'疑似机构名（未命中后缀规则）', line:31, frag:'某*分部'},

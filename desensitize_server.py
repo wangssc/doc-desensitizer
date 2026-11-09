@@ -191,6 +191,7 @@ def do_scrub(payload):
     mapper = D.Mapper()
     stats = {"warn_no_run": []}
     results, risks = [], []
+    readability = []
     after_chunks = []
     total = 0
 
@@ -221,6 +222,9 @@ def do_scrub(payload):
 
             for kind, line, frag in D.risk_scan(before, after):
                 risks.append({"file": name, "kind": kind, "line": line, "frag": frag})
+            # 可读性回检：只报机械特征（占位符被拆进词里），不阻断
+            for kind, line, frag in D.readability_scan(after):
+                readability.append({"file": name, "kind": kind, "line": line, "frag": frag})
 
             after_chunks.append(after)
             total += n
@@ -245,6 +249,16 @@ def do_scrub(payload):
         f.write("\n## 二、各类别命中\n\n| 类别 | 数量 |\n|---|---|\n")
         for k, v in sorted(mapper.stat.items(), key=lambda x: -x[1]):
             f.write("| %s | %d |\n" % (k, v))
+        f.write("\n## 二·补充、无法分类的实体（需人工确认）\n\n")
+        un = D.unclassified_rows(mapper)
+        if un:
+            f.write("这些实体没命中单位/系统/型号后缀，按 `[未分类N]` 处理。"
+                    "请对照映射表确认它们该归到哪一类。\n\n")
+            f.write("| 占位符 | 遮蔽片段 |\n|---|---|\n")
+            for ph, frag in un:
+                f.write("| %s | `%s` |\n" % (ph, frag))
+        else:
+            f.write("无。\n")
         f.write("\n## 三、映射表\n\n占位符与原文的对应关系见 `%s`，该文件含原文，严禁外发。"
                 "已用口令加密，还原时要输同一个口令；口令丢了就没法还原。\n" % mapfile)
         f.write("\n## 四、残留风险（需人工复核）\n\n")
@@ -278,6 +292,19 @@ def do_scrub(payload):
         else:
             f.write("本批没有 .docx，无需处理。\n")
 
+        f.write("\n## 六、疑似误伤（机械检查，不阻断）\n\n")
+        if readability:
+            f.write("下面这些位置像是把词拆开了。工具不做语义判断，只按字符位置报出来，"
+                    "**请对照脱敏文件人工确认**。\n\n")
+            f.write("| 文件 | 现象 | 行号 | 片段 |\n|---|---|---|---|\n")
+            for r in readability[:80]:
+                f.write("| %s | %s | %d | `%s` |\n"
+                        % (r["file"], r["kind"], r["line"], r["frag"]))
+            if len(readability) > 80:
+                f.write("\n（另有 %d 条未列出）\n" % (len(readability) - 80))
+        else:
+            f.write("未发现占位符被拆进词里的迹象。\n")
+
     high = [r for r in risks if D.is_high(r["kind"])]
     media_out = [{"file": os.path.basename(p), "name": n.rsplit("/", 1)[-1],
                   "size": s, "mode": m}
@@ -301,6 +328,7 @@ def do_scrub(payload):
 
     return {"ok": True, "dir": outdir, "batch": batch, "total": total, "files": results,
             "stat": mapper.stat, "risks": risks[:200], "riskTotal": len(risks),
+            "readability": readability[:200], "readabilityTotal": len(readability),
             "high": len(high), "mapfile": mapfile, "report": report,
             "media": media_out, "encrypted": bool(map_pwd), "review": review,
             "code": 2 if high else 0}, 200
