@@ -1,5 +1,8 @@
 ﻿# 文档脱敏工具启动器
 # 已在跑 → 直接开浏览器；没跑 → 起 exe，等它就绪再开
+# 加 -NoBrowser 只起服务不开浏览器（自动化测试用）
+param([switch]$NoBrowser)
+
 $ErrorActionPreference = "Stop"
 
 $Root = Split-Path -Parent $MyInvocation.MyCommand.Path
@@ -25,9 +28,11 @@ function Find-Desens {
 
 $port = Find-Desens
 if ($port -gt 0) {
-    Write-Host "服务已经在运行，正在打开浏览器…" -ForegroundColor Green
-    Start-Process "http://127.0.0.1:$port"
-    Start-Sleep -Milliseconds 800
+    Write-Host "服务已经在运行：http://127.0.0.1:$port" -ForegroundColor Green
+    if (-not $NoBrowser) {
+        Start-Process "http://127.0.0.1:$port"
+        Start-Sleep -Milliseconds 800
+    }
     exit 0
 }
 
@@ -39,8 +44,10 @@ for ($i = 0; $i -lt 40; $i++) {
     $port = Find-Desens
     if ($port -gt 0) {
         Write-Host "已经启动：http://127.0.0.1:$port" -ForegroundColor Green
-        Start-Process "http://127.0.0.1:$port"
-        Start-Sleep -Milliseconds 800
+        if (-not $NoBrowser) {
+            Start-Process "http://127.0.0.1:$port"
+            Start-Sleep -Milliseconds 800
+        }
         exit 0
     }
 }
