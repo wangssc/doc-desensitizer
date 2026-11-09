@@ -84,14 +84,21 @@ python desensitize_server.py
 Command line:
 
 ```bash
-python desensitize.py 客户端资料.docx
-python desensitize.py 客户端资料/ -o out/desens
-python desensitize.py 资料.docx --dict 自定义词表.txt
-python desensitize.py 资料.docx --aggressive
-python desensitize.py 资料.docx --images strip
-python desensitize.py 资料.docx --map-password 口令
+python desensitize.py 客户端资料.docx --map-password 口令     # required, min 6 chars
+python desensitize.py 客户端资料/ -o out/desens --map-password 口令
+python desensitize.py 资料.docx --dict 自定义词表.txt --map-password 口令
+python desensitize.py 资料.docx --aggressive --map-password 口令
+python desensitize.py 资料.docx --images strip --map-password 口令
 python desensitize.py 脱敏版.docx --restore out/desens/映射表_xxx.json --map-password 口令
 ```
+
+The map password is mandatory: the map file holds the original text, so writing it
+in plaintext is the same as not desensitizing at all.
+
+For .docx input the tool also clears what Word hides but recipients can still read:
+author/last-modified-by, company, title/subject/notes, custom properties, comments
+and comment authors, tracked changes (accepted), hidden text (marker removed, text
+kept and desensitized normally), and turns off revision tracking.
 
 Exit codes: `0` fine; `2` high-risk residue found, needs a human look.
 

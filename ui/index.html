@@ -80,6 +80,7 @@ header .tag{font-size:12px; color:#a8c6e6}
   textarea:focus, input:focus{outline:2px solid #cfe3fb; border-color:var(--brand2)}
   .hint{font-size:12px; color:var(--sub); margin-top:6px}
   .hint.warn{color:var(--warn)}
+  .hint.danger{color:var(--danger)}
   .pw{
     flex:1; min-width:200px; padding:8px 10px; font-size:13px; font-family:inherit;
     border:1px solid var(--line); border-radius:7px; background:#fcfdff;
@@ -148,6 +149,26 @@ header .tag{font-size:12px; color:#a8c6e6}
     border-top-color:var(--brand2); border-radius:50%; animation:spin .7s linear infinite;
     vertical-align:-2px; margin-right:6px}
   @keyframes spin{to{transform:rotate(360deg)}}
+  /* ---------- 复核 / 复制 / 还原 ---------- */
+  .pass{background:#eefaf3; border:1px solid #bfe6d2; border-radius:8px;
+    padding:10px 14px; font-size:13px; color:#0d6b46; margin:4px 0 14px}
+  .leak{
+    background:#fdf1f1; border:1px solid #f2c9c9; border-left:4px solid var(--danger);
+    border-radius:8px; padding:13px 16px; margin:4px 0 14px; color:#8f1d1d;
+  }
+  .leak .t{font-size:13.5px; font-weight:600; color:var(--danger)}
+  .leak ul{margin:8px 0 4px; padding-left:20px; font-size:13px; line-height:1.8}
+  .leak code{background:#fff; border:1px solid #f0cfcf; border-radius:4px;
+    padding:1px 5px; font-family:Consolas,monospace; color:var(--danger)}
+  .leak .s{font-size:12px; color:#9c3b3b; margin:6px 0 0}
+  .copyrow{display:flex; align-items:center; gap:14px; flex-wrap:wrap}
+  .copyrow .btn{padding:9px 20px}
+  .promptprev{
+    margin:12px 0 0; padding:10px 12px; background:#f7fafd; border:1px dashed #d5e0ec;
+    border-radius:7px; font-size:12px; line-height:1.7; color:var(--sub);
+    white-space:pre-wrap; font-family:inherit;
+  }
+  .rthead{font-size:12px; color:var(--sub); margin:-6px 0 10px}
 </style>
 </head>
 <body>
@@ -198,9 +219,11 @@ header .tag{font-size:12px; color:#a8c6e6}
         <div style="display:flex;flex-direction:column;gap:6px">
           <label class="chk"><input type="checkbox" id="aggr"> 激进模式（连没有上下文的疑似人名也脱，误杀更多）</label>
           <label class="chk"><input type="checkbox" id="stripimg"> 移除文档里的图片（Word 里的图脱不到，图上的 IP、系统名全留着）</label>
-          <label class="chk"><input type="checkbox" id="encmap" checked> 加密映射表（映射表里就是原文，加密后误发出去也打不开）</label>
+          <label class="chk"><input type="checkbox" id="encmap" checked disabled> 映射表强制加密（不可关闭）</label>
           <input type="password" id="mappwd" class="pw" autocomplete="new-password"
-                 placeholder="映射表口令（还原时要用同一个，丢了还原不回来）" style="max-width:420px">
+                 placeholder="映射表口令（至少 6 位，还原时要用同一个，丢了还原不回来）" style="max-width:420px">
+          <div class="hint danger" id="pwdWhy">映射表里是原文对照，明文落到磁盘上等于没脱敏。
+            必须设口令（至少 6 位），没填不能开始；口令丢了就还原不回来。</div>
         </div>
         <div style="display:flex;flex-direction:column;align-items:flex-end;gap:4px">
           <button class="btn primary" id="go">开 始 脱 敏</button>
@@ -214,6 +237,8 @@ header .tag{font-size:12px; color:#a8c6e6}
 
   <!-- ============ 还原 ============ -->
   <section id="pane-restore" class="hidden">
+    <div id="textRestoreHost"></div>
+
     <div class="card">
       <h2><span class="n">1</span>脱敏后的文件</h2>
       <div class="drop" id="drop2">
@@ -231,10 +256,11 @@ header .tag{font-size:12px; color:#a8c6e6}
       </div>
       <input type="file" id="picker3" accept=".json" class="hidden">
       <div class="files" id="files3"></div>
-      <div class="row hidden" id="rpwdrow" style="margin-top:10px">
+      <div class="row" id="rpwdrow" style="margin-top:10px">
         <input type="password" id="restorePwd" class="pw" autocomplete="off"
-               placeholder="映射表口令（脱敏时设的那个）">
+               placeholder="映射表口令（必填，至少 6 位）">
       </div>
+      <div class="hint danger">映射表是加密的，没有口令解不开；口令就是脱敏时设的那个。</div>
       <div class="hint warn">还原后的文件等于原始资料，注意存放在哪台机器、哪个目录。</div>
     </div>
     <div class="card">
@@ -249,7 +275,7 @@ header .tag{font-size:12px; color:#a8c6e6}
     <div class="ico">⚠</div>
     <div>
       <p class="t">映射表里存的是原文，拿到它就能把脱敏件还原回去</p>
-      <p class="s">它和脱敏件一起发出去，等于没脱敏。默认会用你填的口令加密，但口令别跟着文件走——
+      <p class="s">它和脱敏件一起发出去，等于没脱敏。映射表强制用口令加密（不可关闭），但口令别跟着文件走——
         对外只发带「_脱敏」的文件；映射表只在需要还原时用，用完单独存放或删掉，别跟脱敏件放在同一个文件夹里。</p>
     </div>
   </div>
@@ -259,12 +285,39 @@ header .tag{font-size:12px; color:#a8c6e6}
 const $ = s => document.querySelector(s);
 let files = [], rfile = null, rmap = null, rmapText = null, rmapEnc = false;
 
-/* 映射表加密：勾着就必须给口令，不给就别开始——否则落盘的还是明文原文 */
-$('#encmap').onchange = () => {
-  const on = $('#encmap').checked;
-  $('#mappwd').style.display = on ? '' : 'none';
-  if (on) $('#mappwd').focus();
-};
+/* 复制给 AI 时附带的提示词：AI 爱把 [人员1] 改成 [人员 1] 或翻译掉，加这句能少一半返工 */
+const PROMPT = '下面是一份文档。其中方括号加编号的是占位符（例如 [人员1]、[单位2]、[IP1]），\n'
+  + '请把它们当作真实名称原样保留：不要改写、不要翻译、不要解释、不要在括号里加空格。';
+
+async function copyText(t){
+  try {
+    await navigator.clipboard.writeText(t);
+    return true;
+  } catch (e) {
+    // 老浏览器 / 非安全上下文兜底
+    const ta = document.createElement('textarea');
+    ta.value = t;
+    ta.style.cssText = 'position:fixed;left:-9999px;top:0';
+    document.body.appendChild(ta);
+    ta.select();
+    let ok = false;
+    try { ok = document.execCommand('copy'); } catch (_) { ok = false; }
+    ta.remove();
+    return ok;
+  }
+}
+
+
+/* 映射表口令：强制必填。空着或不足 6 位，「开始脱敏」就是灰的——
+   不留"不填也能跑"这条路，否则落盘的就是明文原文。 */
+const PWD_MIN = 6;
+function syncGo(){
+  const ok = $('#mappwd').value.trim().length >= PWD_MIN;
+  $('#go').disabled = !ok;
+  $('#pwdWhy').classList.toggle('danger', !ok);
+}
+$('#mappwd').addEventListener('input', syncGo);
+syncGo();
 
 /* ---------- 标签切换 ---------- */
 document.querySelectorAll('.tab').forEach(t => t.onclick = () => {
@@ -429,9 +482,16 @@ async function checkMap(f){
     rmapEnc = (JSON.parse(t) || {}).format === 'desens-map-v2';
     rmapText = t;
   } catch (e) { rmapEnc = false; rmapText = null; }
-  $('#rpwdrow').classList.toggle('hidden', !rmapEnc);
   $('#restorePwd').value = '';
+  syncGo2();
 }
+
+/* 还原也要口令：映射表是加密的，空着不放行 */
+function syncGo2(){
+  $('#go2').disabled = $('#restorePwd').value.trim().length < PWD_MIN;
+}
+$('#restorePwd').addEventListener('input', syncGo2);
+syncGo2();
 
 function wireSingle(dropEl, inputEl, boxEl, which){
   wireDrop(dropEl, inputEl, (fs, skipped) => {
@@ -447,15 +507,15 @@ function wireSingle(dropEl, inputEl, boxEl, which){
 }
 wireSingle($('#drop2'), $('#picker2'), $('#files2'), 'file');
 wireSingle($('#drop3'), $('#picker3'), $('#files3'), 'map');
+mountRestore($('#textRestoreHost'), {});   // 「还原」标签页的整篇粘贴还原
 
 /* ---------- 执行脱敏 ---------- */
 $('#go').onclick = async () => {
   if (!files.length) { alert('先选文件。'); return; }
   const mapPwd = $('#mappwd').value;
-  if ($('#encmap').checked && !mapPwd.trim()) {
-    alert('勾了「加密映射表」但没填口令。\n\n'
-      + '填一个口令（还原时要用同一个，丢了还原不回来）；'
-      + '确实不想加密就取消勾选——那样映射表是明文原文，别和脱敏件一起发出去。');
+  if (mapPwd.trim().length < PWD_MIN) {
+    alert('映射表口令至少 ' + PWD_MIN + ' 位。\n\n'
+      + '映射表里是原文对照，明文落到磁盘上等于没脱敏；还原时还要用同一个口令。');
     $('#mappwd').focus();
     return;
   }
@@ -501,7 +561,7 @@ $('#go').onclick = async () => {
   try {
     const payload = { files: [], words: $('#words').value, aggressive: $('#aggr').checked,
                       stripImages: $('#stripimg').checked,
-                      mapPassword: $('#encmap').checked ? mapPwd : '' };
+                      mapPassword: mapPwd };
     for (let i = 0; i < files.length; i++) {
       const f = files[i];
       setProg(`读取 ${i + 1}/${files.length}：${f.name}`);
@@ -523,13 +583,17 @@ $('#go').onclick = async () => {
     $('#result').innerHTML = `<div class="banner err">出错了：${esc(msg)}</div>`;
   } finally {
     clearTimeout(timer);
-    btn.disabled = false;
+    syncGo();                       // 口令被清空的话，按钮要重新变灰
     btn.innerHTML = prevHtml;
     setProg('');
   }
 };
 
 function renderResult(d){
+  window.__lastScrub = d;
+  const rev = d.review || {checked: 0, hits: [], total: 0};
+  const hits = rev.hits || [];
+
   const okBanner = d.high > 0
     ? `<div class="banner warn">已完成，但有 <b>${d.high}</b> 条高置信残留（机构名 / 地名 / 平台类单位名）。
        把对应词加进敏感词表再跑一次，或人工核对报告第四节。</div>`
@@ -544,6 +608,55 @@ function renderResult(d){
 
   const dl = (d.files || []).filter(f => f.out).map(f =>
     `<a class="safe" href="/dl?d=${encodeURIComponent(d.batch)}&f=${encodeURIComponent(f.out)}">下载 ${esc(f.out)}</a>`).join('');
+
+  /* ---- 自动复核：真值回搜脱敏文本，命中就锁住复制按钮 ---- */
+  const leakHtml = hits.length
+    ? `<div class="leak">
+         <div class="t">高危残留：脱敏后的文本里还能搜到 ${hits.length} 个真值</div>
+         <ul>${hits.slice(0, 12).map(h =>
+            `<li><code>${esc(h.value)}</code> 出现 ${h.count} 次</li>`).join('')}</ul>
+         ${hits.length > 12 ? `<p class="s">（另有 ${hits.length - 12} 个未列出）</p>` : ''}
+         <p class="s">这些词没被替换掉，发出去等于把真名发出去。建议把它们加进敏感词表重跑一次。</p>
+         <button class="btn" id="leakOk" style="margin-top:10px;border-color:#e7b0b0;color:#b91c1c">
+           我已确认，仍要复制</button>
+       </div>`
+    : (rev.checked
+        ? `<div class="pass">复核通过：映射表里 ${rev.checked} 个真值，脱敏后一次都没出现。</div>`
+        : `<div class="pass">本次没有替换任何内容，无需复核。</div>`);
+
+  const withText = (d.files || []).filter(f => typeof f.text === 'string');
+  const selHtml = withText.length > 1
+    ? `<select id="copySel" class="pw" style="max-width:260px">${withText.map((f, i) =>
+        `<option value="${i}">${esc(f.name)}</option>`).join('')}</select>`
+    : '';
+
+  /* ---- Word 里看不见、发出去对方却看得见的东西 ---- */
+  const clearedFields = rev.metadata_cleared || [];
+  const metaCard = rev.docx_cleaned ? `<div class="card">
+      <h2>Word 隐藏内容（已清）</h2>
+      <div class="hint">这些内容在 Word 里看不见，文件发出去对方却能看见。已随本次脱敏一起清掉。</div>
+      <table style="margin-top:10px"><tbody>
+        <tr><th style="width:120px">文档属性</th><td>${clearedFields.length
+          ? clearedFields.map(x => `<code>${esc(x)}</code>`).join('、') : '无可清字段'}</td></tr>
+        <tr><th>自定义属性</th><td>删除 ${rev.custom_props_removed || 0} 个</td></tr>
+        <tr><th>批注</th><td>删除 ${rev.comments_removed || 0} 条（comments.xml / people.xml 整份移除）</td></tr>
+        <tr><th>修订</th><td>接受 ${rev.revisions_accepted || 0} 处（插入保留、删除丢弃）</td></tr>
+        <tr><th>隐藏文字</th><td>${rev.hidden_text_revealed || 0} 处去掉隐藏标记，文字保留并已脱敏</td></tr>
+      </tbody></table>
+    </div>` : '';
+
+  const copyCard = withText.length ? `<div class="card">
+      <h2>复制脱敏文本（发给 AI）</h2>
+      ${leakHtml}
+      <div class="copyrow">
+        ${selHtml}
+        <label class="chk"><input type="checkbox" id="withPrompt" checked>
+          带提示词模板（防止 AI 改写占位符）</label>
+        <button class="btn primary" id="copyBtn" ${hits.length ? 'disabled' : ''}>复制到剪贴板</button>
+        <span class="hint" id="copyInfo"></span>
+      </div>
+      <pre class="promptprev" id="promptPrev">${esc(PROMPT)}</pre>
+    </div>` : '';
 
   $('#result').classList.remove('hidden');
   $('#result').innerHTML = `
@@ -561,6 +674,8 @@ function renderResult(d){
       </div>
       <div class="hint">输出目录：<span class="mono">${esc(d.dir)}</span></div>
     </div>
+    ${metaCard}
+    ${copyCard}
     <div class="card">
       <h2>各类别命中</h2>
       <table style="width:auto;min-width:300px"><thead><tr><th>类别</th><th>数量</th></tr></thead><tbody>${statRows}</tbody></table>
@@ -587,8 +702,138 @@ function renderResult(d){
       <div class="dl" style="margin-top:10px">
         <a class="danger" href="/dl?d=${encodeURIComponent(d.batch)}&f=${encodeURIComponent(d.mapfile)}">下载映射表</a>
       </div>
-    </div>`;
+    </div>
+    <div class="restore-host"></div>`;
+
+  /* ---- 复制 / 放行 ---- */
+  const copyBtn = $('#copyBtn');
+  if (copyBtn) {
+    copyBtn.onclick = async () => {
+      const list = ((window.__lastScrub || {}).files || []).filter(f => typeof f.text === 'string');
+      const sel = $('#copySel');
+      const f = list[sel ? +sel.value : 0];
+      if (!f) return;
+      const txt = ($('#withPrompt').checked ? PROMPT + '\n\n' : '') + f.text;
+      const ok = await copyText(txt);
+      $('#copyInfo').textContent = ok ? `已复制 ${txt.length} 字，直接粘给 AI` : '复制失败，请手动选中复制';
+    };
+    const leakOk = $('#leakOk');
+    if (leakOk) leakOk.onclick = () => {
+      copyBtn.disabled = false;
+      leakOk.disabled = true;
+      leakOk.textContent = '已放行（确认过残留）';
+    };
+  }
+
+  mountRestore($('#result').querySelector('.restore-host'), {mapfile: d.mapfile, batch: d.batch});
   window.scrollTo({top: 0, behavior: 'smooth'});
+}
+
+/* ---------- 还原区：整篇粘贴还原（结果页和「还原」标签页共用） ---------- */
+function mountRestore(host, opt){
+  if (!host) return;
+  opt = opt || {};
+  host.innerHTML = `<div class="card" style="border-color:#cfe3fb;background:#fbfdff">
+    <h2>还原 AI 返回的内容</h2>
+    <div class="rthead">把 AI 改完的整篇内容贴进来，占位符会换回真名。
+      <b>[人员 1]</b> 这种被加了空格的也认；映射表里没有的占位符原样保留，不会瞎猜。</div>
+    <textarea class="rt-in" style="min-height:130px" placeholder="粘贴 AI 返回的整篇内容…"></textarea>
+    <div class="row" style="margin-top:10px">
+      <select class="rt-map pw" style="max-width:330px"></select>
+      <input class="rt-path pw" style="max-width:300px" placeholder="或手输映射表路径（可选）">
+      <input class="rt-pwd pw" type="password" style="max-width:230px" autocomplete="off"
+             placeholder="映射表口令（必填，至少 6 位）">
+      <button class="btn primary rt-go" style="padding:9px 22px">还 原</button>
+    </div>
+    <div class="hint danger rt-pwdmsg">映射表是加密的，没有口令解不开。</div>
+    <div class="hint rt-msg"></div>
+    <textarea class="rt-out" readonly style="min-height:130px;margin-top:8px"
+              placeholder="还原结果会显示在这里"></textarea>
+    <div class="row" style="margin-top:8px">
+      <button class="btn rt-copy" disabled>复制还原结果</button>
+      <span class="hint rt-info"></span>
+    </div>
+  </div>`;
+
+  const q = s => host.querySelector(s);
+  const sel = q('.rt-map');
+  const msg = q('.rt-msg');
+  // 口令必填：空着就把「还原」按灰，别让用户点了才看到 400
+  const pwdEl = q('.rt-pwd');
+  const goBtn = q('.rt-go');
+  const sync = () => { goBtn.disabled = pwdEl.value.trim().length < PWD_MIN; };
+  pwdEl.addEventListener('input', sync);
+  sync();
+
+  fetch('/api/maps').then(r => r.json()).then(dd => {
+    const maps = dd.maps || [];
+    if (!maps.length) {
+      sel.innerHTML = '<option value="">（输出目录里还没有映射表）</option>';
+      return;
+    }
+    sel.innerHTML = maps.map(m =>
+      `<option value="${esc(m.file)}" data-batch="${esc(m.batch)}">${esc(m.file)} · ${esc(m.batch)}${m.enc ? ' · 加密' : ''}</option>`
+    ).join('');
+    if (opt.mapfile) {
+      const i = [...sel.options].findIndex(o =>
+        o.value === opt.mapfile && (!opt.batch || o.dataset.batch === opt.batch));
+      if (i >= 0) sel.selectedIndex = i;
+    }
+  }).catch(() => { sel.innerHTML = '<option value="">（读不到映射表列表）</option>'; });
+
+  q('.rt-go').onclick = async () => {
+    const text = q('.rt-in').value;
+    if (!text.trim()) { msg.className = 'hint warn rt-msg'; msg.textContent = '先把 AI 返回的内容贴进来。'; return; }
+    if (q('.rt-pwd').value.trim().length < PWD_MIN) {
+      msg.className = 'hint danger rt-msg';
+      msg.textContent = '先填映射表口令（至少 ' + PWD_MIN + ' 位），映射表是加密的。';
+      q('.rt-pwd').focus();
+      return;
+    }
+    const typed = q('.rt-path').value.trim();
+    const cur = sel.options[sel.selectedIndex];
+    const mapfile = typed || (cur ? cur.value : '');
+    if (!mapfile) { msg.className = 'hint warn rt-msg'; msg.textContent = '没有可用的映射表：请选一份，或手输路径。'; return; }
+
+    const btn = q('.rt-go');
+    const prev = btn.innerHTML;
+    btn.disabled = true;
+    btn.innerHTML = '<span class="loading"></span>还原中…';
+    msg.className = 'hint rt-msg';
+    msg.textContent = '';
+    try {
+      const r = await fetch('/api/restore', {
+        method: 'POST', headers: {'Content-Type': 'application/json'},
+        body: JSON.stringify({
+          text, mapfile,
+          mapbatch: typed ? '' : (cur ? (cur.dataset.batch || '') : ''),
+          password: q('.rt-pwd').value
+        })
+      });
+      const dd = await r.json();
+      if (!dd.ok) throw new Error(dd.error || '还原失败');
+      q('.rt-out').value = dd.text;
+      q('.rt-copy').disabled = !dd.text;
+      const unk = dd.unknown || [];
+      q('.rt-info').textContent = `替换了 ${dd.replaced} 处` + (unk.length
+        ? `；${unk.length} 个占位符在映射表里找不到，原样保留：${unk.slice(0, 10).join('、')}${unk.length > 10 ? ' …' : ''}`
+        : '；没有不认识的占位符');
+    } catch (e) {
+      msg.className = 'hint warn rt-msg';
+      msg.textContent = e.message || String(e);
+      q('.rt-out').value = '';
+      q('.rt-copy').disabled = true;
+      q('.rt-info').textContent = '';
+    } finally {
+      sync();
+      btn.innerHTML = prev;
+    }
+  };
+
+  q('.rt-copy').onclick = async () => {
+    const ok = await copyText(q('.rt-out').value);
+    q('.rt-info').textContent = ok ? '已复制还原结果' : '复制失败，请手动选中复制';
+  };
 }
 
 async function openDir(){
@@ -601,8 +846,10 @@ if (location.hash === '#demo') {
     total: 60, riskTotal: 3, high: 1, code: 2,
     dir: '脱敏输出\\gui_20240101_000000',
     batch: 'gui_20240101_000000',
-    files: [{name:'客户方案.docx', out:'客户方案_脱敏.docx', count:45}],
+    files: [{name:'客户方案.docx', out:'客户方案_脱敏.docx', count:45,
+             text:'一、项目概况\n建设单位：[单位1]\n项目负责人：[人员1]\n应用地址：[IP1]'}],
     mapfile: '映射表_20240101_000000.json', report: '脱敏报告_20240101_000000.md',
+    review: {checked: 27, total: 0, hits: []},
     stat: {IP:10, 型号:7, 单位:6, 编号:5, 人员:5, 电话:3, 地址:2, 账号:2,
            域名:2, 路径:1, 邮箱:1, 证件号:1},
     risks: [
@@ -617,7 +864,10 @@ $('#go2').onclick = async () => {
   if (!rfile) { alert('先选脱敏文件。'); return; }
   if (!rmap) { alert('先选映射表。'); return; }
   const mapPwd = $('#restorePwd').value;
-  if (rmapEnc && !mapPwd.trim()) { alert('这份映射表是加密的，先填口令。'); $('#restorePwd').focus(); return; }
+  if (mapPwd.trim().length < PWD_MIN) {
+    alert('先填映射表口令（至少 ' + PWD_MIN + ' 位）。映射表是加密的，没有口令解不开。');
+    $('#restorePwd').focus(); return;
+  }
   const btn = $('#go2');
   btn.disabled = true;
   btn.innerHTML = '<span class="loading"></span>正在还原…';
@@ -627,7 +877,7 @@ $('#go2').onclick = async () => {
       name: rfile.name,
       data: await readBase64(rfile),
       map: mapText,
-      mapPassword: rmapEnc ? mapPwd : ''
+      mapPassword: mapPwd
     };
     const r = await fetch('/api/restore', {
       method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify(payload)
@@ -646,7 +896,7 @@ $('#go2').onclick = async () => {
     $('#result2').classList.remove('hidden');
     $('#result2').innerHTML = `<div class="banner err">出错了：${esc(e.message)}</div>`;
   } finally {
-    btn.disabled = false;
+    syncGo2();
     btn.textContent = '开 始 还 原';
   }
 };

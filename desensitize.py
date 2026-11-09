@@ -139,6 +139,72 @@ def load_map(path, password=None):
     return decrypt_map(data, password) if is_encrypted(data) else data
 
 
+# ---------------------------------------------------------------- 反向还原（文本）
+# 用户从 AI 那边复制回来的文本里，占位符常被加空格：[人员 1]、[ 人员1 ]、[人员1 ]。
+# 只认「去掉空白后与映射表完全一致」的，认不出就原样留着并报出来。
+# 换错名字比留着占位符危险得多——绝不猜。
+RE_BRACKET_TOKEN = re.compile(r"[\[［]\s*([^\[\]［］\n]{1,40}?)\s*[\]］]")
+# 长得像本工具占位符（类别 + 可选编号）的，才值得报「不认识」；
+# 普通方括号内容（[注]、[1]）不该进 unknown 列表。
+RE_PH_LIKE = re.compile(
+    r"(?:单位|机关|人员|IP|域名|型号|电话|邮箱|证件号|编号|路径|账号|组织|自定义|地址)\d*",
+    re.I)
+
+
+def _norm_ph(s):
+    return re.sub(r"\s+", "", s)
+
+
+def restore_text(text, pairs, unknown=None):
+    """占位符 → 原文，容错空白。返回 (新文本, 替换处数, 未知占位符列表)。
+
+    pairs 为 [(占位符, 原文)]。只替换映射表里确切存在的条目；
+    不认识的括号内容原样保留，并记进 unknown。一次扫描完成，不会把
+    替换结果再当占位符替换一遍（原文里带方括号也不会被二次污染）。
+    """
+    table = {_norm_ph(ph).strip("[]［］"): orig for ph, orig in pairs}
+    unk = unknown if unknown is not None else []
+    seen = set(unk)
+    n = 0
+
+    def repl(m):
+        nonlocal n
+        key = _norm_ph(m.group(1))
+        if key in table:
+            n += 1
+            return table[key]
+        if RE_PH_LIKE.fullmatch(key):
+            tok = "[%s]" % key
+            if tok not in seen:
+                seen.add(tok)
+                unk.append(tok)
+        return m.group(0)
+
+    return RE_BRACKET_TOKEN.sub(repl, text), n, unk
+
+
+def leak_scan(text, originals, min_len=2):
+    """在脱敏后的文本里搜映射表的真值。返回 [(真值, 出现次数)]，按次数降序。
+
+    这是「脱敏漏了」的最后一道闸：引擎没识别出来的真名会原样留在文本里。
+    用一条合并正则扫一遍，避免「几百个真值 × 几十万字」的重复全文搜索。
+    """
+    vals = [v for v in dict.fromkeys(originals) if v and len(v) >= min_len]
+    if not vals or not text:
+        return []
+    vals.sort(key=len, reverse=True)
+    canon = {}
+    for v in vals:
+        canon.setdefault(v.lower(), v)
+    rx = re.compile("|".join(re.escape(v) for v in vals), re.I)
+    cnt = {}
+    for m in rx.finditer(text):
+        k = m.group(0).lower()
+        cnt[k] = cnt.get(k, 0) + 1
+    return sorted(((canon.get(k, k), c) for k, c in cnt.items()),
+                  key=lambda x: (-x[1], -len(x[0])))
+
+
 # ---------------------------------------------------------------- 识别规则
 
 # 机构后缀（按长度降序，保证最长匹配优先）
@@ -686,6 +752,113 @@ RE_MEDIA = re.compile(r"^word/media/")
 
 SURNAME_ONLY = re.compile(r"[\u4e00-\u9fa5\u00b7]{2,4}")
 
+# ---------------- docx 元数据 / 批注 / 修订清理 ----------------
+# 这些内容在 Word 界面里看不见，但文件一发给对方就跟着出去了：
+# 作者、最后修改人、公司、批注里的真名、修订记录里被删掉的原句。
+# 必须和正文脱敏在同一次读写里做——单独放一个按钮，用户一定会忘。
+
+# core.xml 里要清空的字段。Office 写出来的前缀就是 dc:/cp:，不会变。
+CORE_CLEAR = ("dc:creator", "cp:lastModifiedBy", "dc:title", "dc:subject",
+              "dc:description", "cp:keywords", "cp:category", "cp:lastPrinted")
+# app.xml 是默认命名空间，标签没有前缀。
+APP_CLEAR = ("Company", "Manager", "Template")
+
+# 整份删除的部件。删了必须同时摘掉 [Content_Types].xml 和 *.rels 里的引用，
+# 否则 Word 打开就报"文件已损坏"。
+RE_DROP_PART = re.compile(
+    r"^(?:docProps/custom\.xml|word/comments\.xml|word/commentsExtended\.xml|"
+    r"word/commentsIds\.xml|word/commentsExtensible\.xml|word/people\.xml|"
+    r"word/_rels/comments(?:Extended|Ids|Extensible)?\.xml\.rels|"
+    r"word/_rels/people\.xml\.rels)$")
+# 正文里指向批注的锚点，批注删了它们也得删。
+RE_COMMENT_REF = re.compile(r"<w:comment(?:RangeStart|RangeEnd|Reference)\b[^>]*/>")
+RE_VANISH = re.compile(r"<w:vanish\b[^>]*?/>|<w:vanish\b[^>]*>\s*</w:vanish>")
+RE_FALSE_VAL = re.compile(r'w:val\s*=\s*"(?:0|false|off)"', re.I)
+
+
+def _clear_fields(xml, names):
+    """把这些属性元素整个删掉（Word 里就是空白），返回 (新 xml, 真正清掉的字段名)。
+
+    成对标签和自闭合两种写法都认，同一字段出现多次就全删——留着空元素不但没用，
+    还能拼出 <Manager/></Manager> 这种坏 XML（真实文档里 <Manager/> 很常见）。
+    """
+    cleared = []
+
+    for name in names:
+        pat = re.compile(r"<%s\b[^>]*?/>|<%s\b[^>]*>(.*?)</%s>"
+                         % (re.escape(name), re.escape(name), re.escape(name)), re.S)
+
+        def drop(m, _n=name):
+            if m.group(1) and m.group(1).strip():
+                cleared.append(_n)
+            return ""
+
+        xml = pat.sub(drop, xml)
+    return xml, cleared
+
+
+def _unref_part(xml, part):
+    """把一个被删掉的部件从 [Content_Types].xml / *.rels 里摘干净。"""
+    xml = re.sub(r'<Override\b[^>]*PartName="/%s"[^>]*/>' % re.escape(part), "", xml)
+    base = part.rsplit("/", 1)[-1]
+    xml = re.sub(r'<Relationship\b[^>]*Target="(?:[^"]*/)?%s"[^>]*/>'
+                 % re.escape(base), "", xml)
+    return xml
+
+
+def _accept_revisions(xml):
+    """接受全部修订：插入/移入的内容留下，删除/移走的内容丢掉，格式变更记录整块删。
+
+    返回 (新 xml, 处理的修订处数)。
+    """
+    n = 0
+    # 1) 格式变更记录先整块删：里面是旧格式快照，留着等于把改动前的样子也带出去
+    for tag in ("pPrChange", "rPrChange", "sectPrChange", "tblPrChange",
+                "trPrChange", "tcPrChange", "tblPrExChange", "tblGridChange",
+                "numberingChange"):
+        pat = re.compile(r"<w:%s\b[^>]*?(?:/>|>.*?</w:%s>)" % (tag, tag), re.S)
+        xml, k = pat.subn("", xml)
+        n += k
+    # 2) 移动位置标记：成对出现、不含内容，删掉不留痕（不单独计数，一次移动算一处）
+    for tag in ("moveFromRangeStart", "moveFromRangeEnd",
+                "moveToRangeStart", "moveToRangeEnd"):
+        xml, _k = re.subn(r"<w:%s\b[^>]*/>" % tag, "", xml)
+    # 3) 删除 / 移走：内容整块丢掉。这些字在"接受修订"之后本来就不存在了。
+    #    注意 w:del 不会误伤 w:delText——后面要求紧跟 ">"，字面不同。
+    #    moveFrom 只是 moveTo 的另一半，不单独计数。
+    for tag in ("del", "moveFrom", "cellDel"):
+        pat = re.compile(r"<w:%s\b[^>]*?(?:/>|>.*?</w:%s>)" % (tag, tag), re.S)
+        xml, k = pat.subn("", xml)
+        if tag != "moveFrom":
+            n += k
+    # 4) 插入 / 移入 / 新增单元格：保留内容，只去掉标记。
+    #    <w:ins> 在 <w:rPr> 里是自闭合的（段落标记修订），删掉即可。
+    for tag in ("ins", "moveTo", "cellIns"):
+        xml, k1 = re.subn(r"<w:%s\b[^>]*/>" % tag, "", xml)
+        xml, k2 = re.subn(r"<w:%s\b[^>]*>(.*?)</w:%s>" % (tag, tag),
+                          lambda m: m.group(1), xml, flags=re.S)
+        n += k1 + k2
+    return xml, n
+
+
+def _strip_vanish(xml):
+    """隐藏文字：保留文字、去掉 vanish 标记。
+
+    选"保留文字"而不是"整段删掉"，因为隐藏文字往往正是作者不想让人看见的那部分
+    （客户名、内部备注、没删干净的旧版本）。删掉等于静默丢内容，用户不知道少了什么；
+    去掉标记让它变成正常正文，就能走同一套脱敏 + 复核，漏没漏一眼看得见。
+    """
+    n = 0
+
+    def f(m):
+        nonlocal n
+        if RE_FALSE_VAL.search(m.group(0)):
+            return m.group(0)      # val="0" 表示"不隐藏"，本来就不该动
+        n += 1
+        return ""
+
+    return RE_VANISH.sub(f, xml), n
+
 
 def _xml_unescape(s):
     return (s.replace("&lt;", "<").replace("&gt;", ">")
@@ -787,7 +960,9 @@ def _scrub_table(tbl, mapper, cw, agg):
 
 
 def _docx_transform(path, dest, mapper, cw, agg, stats, images="keep"):
-    """打开 docx，跑表格人名与段落脱敏，写回 dest。返回 (替换数, 原文, 脱敏后文本)。
+    """打开 docx，清理元数据/批注/修订，再跑表格人名与段落脱敏，写回 dest。
+
+    返回 (替换数, 原文, 脱敏后文本)。
 
     images: "keep" 原样保留图片（并在报告里列清单提示人工核对）；
             "strip" 删除 word/media 与正文里的图片节点，保证图里的文字不外泄。
@@ -796,34 +971,91 @@ def _docx_transform(path, dest, mapper, cw, agg, stats, images="keep"):
     changed, total = {}, 0
     orig_chunks, new_chunks = [], []
     media_found = []
+    dropped = set()
+    meta = {"metadata_cleared": [], "comments_removed": 0, "revisions_accepted": 0,
+            "hidden_text_revealed": 0, "custom_props_removed": 0,
+            "track_revisions_removed": 0, "dropped_parts": []}
+
     with zipfile.ZipFile(path) as zin:
+        names = zin.namelist()
         for item in zin.infolist():
             if RE_MEDIA.match(item.filename):
                 media_found.append((item.filename, item.file_size))
         if media_found:
             stats.setdefault("media", []).append((path, media_found, images))
-        for name in zin.namelist():
-            if not RE_PART.match(name):
+
+        # ---- 一、元数据 / 批注 / 修订：先清干净，再走正文脱敏 ----
+        # 顺序不能反。<w:del> 里的字存在 <w:delText>，_set_para_text 不认它；
+        # 先脱敏会把整段文字挤进第一个 <w:t>，修订结构和被删内容都会乱掉。
+        for name in names:
+            if not RE_DROP_PART.match(name):
+                continue
+            dropped.add(name)
+            xml = zin.read(name).decode("utf-8", "replace")
+            if name == "word/comments.xml":
+                meta["comments_removed"] += len(re.findall(r"<w:comment[\s>]", xml))
+            elif name == "docProps/custom.xml":
+                meta["custom_props_removed"] += len(re.findall(r"<property[\s>]", xml))
+
+        if "docProps/core.xml" in names:
+            xml = zin.read("docProps/core.xml").decode("utf-8", "replace")
+            new, cleared = _clear_fields(xml, CORE_CLEAR)
+            meta["metadata_cleared"] += cleared
+            if new != xml:
+                changed["docProps/core.xml"] = new
+        if "docProps/app.xml" in names:
+            xml = zin.read("docProps/app.xml").decode("utf-8", "replace")
+            new, cleared = _clear_fields(xml, APP_CLEAR)
+            meta["metadata_cleared"] += cleared
+            if new != xml:
+                changed["docProps/app.xml"] = new
+
+        # 删掉的部件必须从这两个索引里摘掉，否则 Word 认为包里缺文件 = 已损坏
+        for rn in ("[Content_Types].xml", "_rels/.rels", "word/_rels/document.xml.rels"):
+            if rn not in names:
+                continue
+            xml = zin.read(rn).decode("utf-8", "replace")
+            new = xml
+            for d in dropped:
+                new = _unref_part(new, d)
+            if new != xml:
+                changed[rn] = new
+
+        # 修订一旦接受就不能再让 Word 继续记录新的
+        if "word/settings.xml" in names:
+            xml = zin.read("word/settings.xml").decode("utf-8", "replace")
+            new, k = re.subn(r"<w:trackRevisions\b[^>]*/>", "", xml)
+            if k:
+                changed["word/settings.xml"] = new
+                meta["track_revisions_removed"] = k
+
+        # ---- 二、正文脱敏 ----
+        for name in names:
+            if name in dropped or not RE_PART.match(name):
                 continue
             try:
                 xml = zin.read(name).decode("utf-8")
             except UnicodeDecodeError:
                 stats.setdefault("warn_enc", []).append(path)
                 continue
-            if "<w:t" not in xml and images != "strip":
-                continue
             src_text = "\n".join(_para_text(m.group(0)) for m in RE_PARA.finditer(xml))
             orig_chunks.append(src_text)
 
+            work, k = _accept_revisions(xml)
+            meta["revisions_accepted"] += k
+            work, k = _strip_vanish(work)
+            meta["hidden_text_revealed"] += k
+            work = RE_COMMENT_REF.sub("", work)
+
             out = []
             last = 0
-            for m in RE_TBL.finditer(xml):
-                out.append(xml[last:m.start()])
+            for m in RE_TBL.finditer(work):
+                out.append(work[last:m.start()])
                 body, n = _scrub_table(m.group(0), mapper, cw, agg)
                 total += n
                 out.append(body)
                 last = m.end()
-            out.append(xml[last:])
+            out.append(work[last:])
             work = "".join(out)
 
             def on_para(m, _i):
@@ -846,6 +1078,8 @@ def _docx_transform(path, dest, mapper, cw, agg, stats, images="keep"):
         tmp = dest + ".tmp"
         with zipfile.ZipFile(tmp, "w", zipfile.ZIP_DEFLATED) as zout:
             for item in zin.infolist():
+                if item.filename in dropped:
+                    continue
                 if images == "strip" and RE_MEDIA.match(item.filename):
                     continue
                 data = zin.read(item.filename)
@@ -853,6 +1087,10 @@ def _docx_transform(path, dest, mapper, cw, agg, stats, images="keep"):
                     data = changed[item.filename].encode("utf-8")
                 zout.writestr(item, data)
     os.replace(tmp, dest)
+
+    meta["dropped_parts"] = sorted(dropped)
+    meta["metadata_cleared"] = sorted(set(meta["metadata_cleared"]))
+    stats.setdefault("meta", []).append((path, meta))
     return total, "\n".join(orig_chunks), "\n".join(new_chunks)
 
 
@@ -914,6 +1152,17 @@ def gather_files(target):
 # ---------------------------------------------------------------- 主流程
 
 def run_scrub(args):
+    # 口令是硬门槛，不是选项：映射表里是原文对照，明文落盘等于没脱敏。
+    # 先校验再动文件，避免跑完才发现映射表不能留。
+    map_pwd = getattr(args, "map_password", None)
+    if not map_pwd or not map_pwd.strip():
+        print("[无法开始] 必须设置映射表口令：--map-password 至少 6 位。\n"
+              "  映射表里是原文对照，落到磁盘上等于没脱敏。")
+        return 1
+    if len(map_pwd) < 6:
+        print("[无法开始] 映射表口令至少 6 位。")
+        return 1
+
     files = gather_files(args.target)
     if not files:
         print("未找到可处理文件（支持 .txt/.md/.csv/.docx）")
@@ -957,13 +1206,9 @@ def run_scrub(args):
         print("  [完成] %s  ->  %s   替换 %d 处" % (base, os.path.basename(dest), n))
 
     # 映射表
-    map_pwd = getattr(args, "map_password", None)
     mapfile = os.path.join(outdir, "映射表_%s.json" % stamp)
     with open(mapfile, "w", encoding="utf-8") as fh:
         json.dump(mapper.dump(map_pwd), fh, ensure_ascii=False, indent=2)
-    if not map_pwd:
-        print("\n[警告] 映射表未加密，里面是全部原文。别和脱敏件放在一起外发。"
-              "下次加 --map-password 就能加密。")
 
     # 报告（不含原文）
     report = os.path.join(outdir, "脱敏报告_%s.md" % stamp)
@@ -977,10 +1222,9 @@ def run_scrub(args):
         for cat, cnt in sorted(mapper.stat.items(), key=lambda x: -x[1]):
             fh.write("| %s | %d |\n" % (cat, cnt))
         fh.write("\n## 三、占位符对照（仅占位符与类别，不含原文）\n\n")
-        fh.write("占位符与原文的对应关系见 `%s`，该文件含原文，**严禁外发**。%s\n\n"
-                 % (os.path.basename(mapfile),
-                    "已用口令加密，还原时要输同一个口令；口令丢了就没法还原。"
-                    if map_pwd else "**本次未加密**——拿到这个文件就等于拿到原文。"))
+        fh.write("占位符与原文的对应关系见 `%s`，该文件含原文，**严禁外发**。"
+                 "已用口令加密，还原时要输同一个口令；口令丢了就没法还原。\n\n"
+                 % os.path.basename(mapfile))
         fh.write("## 四、残留风险（需人工复核）\n\n")
         if stats["risks"]:
             fh.write("| 文件 | 风险类型 | 行号 | 遮蔽片段 |\n|---|---|---|---|\n")
@@ -992,7 +1236,29 @@ def run_scrub(args):
             fh.write("未发现明显残留。\n")
         fh.write("\n> 遮蔽片段保留首尾字符以便定位，中间以 * 代替，不代表片段全文安全。\n")
 
-        fh.write("\n## 五、图片（文本脱敏碰不到，必须人工处理）\n\n")
+        # Word 里看不见、发出去对方却看得见的东西
+        fh.write("\n## 五、Word 元数据与隐藏内容\n\n")
+        metas = [m for _p, m in stats.get("meta", [])]
+        if metas:
+            cleared = sorted({x for m in metas for x in m["metadata_cleared"]})
+            fh.write("| 项目 | 处理结果 |\n|---|---|\n")
+            fh.write("| 文档属性 | %s |\n" % (
+                "已清空：" + "、".join("`%s`" % x for x in cleared) if cleared else "无"))
+            fh.write("| 自定义属性 | 删除 %d 个 |\n"
+                     % sum(m["custom_props_removed"] for m in metas))
+            fh.write("| 批注 | 删除 %d 条（comments.xml / people.xml 整份移除） |\n"
+                     % sum(m["comments_removed"] for m in metas))
+            fh.write("| 修订 | 接受 %d 处（插入保留、删除丢弃） |\n"
+                     % sum(m["revisions_accepted"] for m in metas))
+            fh.write("| 隐藏文字 | %d 处去掉隐藏标记，文字保留并已走脱敏 |\n"
+                     % sum(m["hidden_text_revealed"] for m in metas))
+            fh.write("| 修订跟踪 | %s |\n"
+                     % ("已关闭" if any(m["track_revisions_removed"] for m in metas)
+                        else "未开启"))
+        else:
+            fh.write("本批没有 .docx，无需处理。\n")
+
+        fh.write("\n## 六、图片（文本脱敏碰不到，必须人工处理）\n\n")
         if stats["media"]:
             any_keep = any(m[2] != "strip" for m in stats["media"])
             if any_keep:
@@ -1062,7 +1328,8 @@ def main():
     ap.add_argument("--dict", help="自定义敏感词表（每行一个词，# 开头为注释）")
     ap.add_argument("--aggressive", action="store_true", help="激进模式：对疑似人名也做替换（误杀率上升）")
     ap.add_argument("--restore", help="传入映射表 json，执行还原")
-    ap.add_argument("--map-password", help="映射表口令：脱敏时给了就加密，还原时要用同一个口令")
+    ap.add_argument("--map-password",
+                    help="映射表口令（脱敏时必填，至少 6 位；还原时要用同一个）")
     ap.add_argument("--images", choices=["keep", "strip"], default="keep",
                     help="docx 里的图片怎么处理：keep 原样保留（报告里列清单提醒人工看），"
                          "strip 整块删除（图里的 IP/系统名脱不到，删了最稳）")

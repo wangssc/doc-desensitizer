@@ -65,6 +65,26 @@ LOCK = threading.Lock()
 LAST = {"dir": None}
 PORT = 8765
 
+# 口令是硬要求，不是选项：映射表里是原文对照，明文落盘等于没脱敏。
+PWD_MIN = 6
+PWD_REQUIRED_MSG = "必须设置映射表口令。映射表里是原文对照，落到磁盘上等于没脱敏。"
+PWD_SHORT_MSG = "映射表口令至少 %d 位。" % PWD_MIN
+
+
+def _check_password(payload):
+    """返回 (口令, 错误对象)。password 和老的 mapPassword 都认，password 优先。"""
+    pwd = payload.get("password")
+    if not isinstance(pwd, str) or not pwd.strip():
+        alt = payload.get("mapPassword")
+        if isinstance(alt, str) and alt.strip():
+            pwd = alt
+    pwd = pwd if isinstance(pwd, str) else ""
+    if not pwd.strip():
+        return "", {"ok": False, "error": PWD_REQUIRED_MSG}
+    if len(pwd) < PWD_MIN:
+        return "", {"ok": False, "error": PWD_SHORT_MSG}
+    return pwd, None
+
 
 def decode_text(raw):
     for enc in ("utf-8", "utf-8-sig", "gbk", "gb18030"):
@@ -84,18 +104,80 @@ def docx_full_text(doc):
     return "\n".join(parts)
 
 
+# ---------------------------------------------------------------- 映射表定位
+def _peek_encrypted(path):
+    """只看文件头几百字节判断是否加密，别为了列个下拉框把整份原文读进内存。"""
+    try:
+        with open(path, "rb") as f:
+            head = f.read(512)
+        return D.MAP_FORMAT.encode("ascii") in head
+    except OSError:
+        return False
+
+
+def list_maps(limit=20):
+    """输出目录里最近的映射表，给还原区做下拉。"""
+    items = []
+    try:
+        batches = os.listdir(OUTROOT)
+    except OSError:
+        return items
+    for b in batches:
+        d = os.path.join(OUTROOT, b)
+        if not os.path.isdir(d) or b.startswith("."):
+            continue
+        try:
+            names = os.listdir(d)
+        except OSError:
+            continue
+        for fn in names:
+            if not (fn.startswith("映射表_") and fn.endswith(".json")):
+                continue
+            p = os.path.join(d, fn)
+            try:
+                st = os.stat(p)
+            except OSError:
+                continue
+            items.append({"batch": b, "file": fn, "mtime": int(st.st_mtime),
+                          "size": st.st_size, "enc": _peek_encrypted(p)})
+    items.sort(key=lambda x: x["mtime"], reverse=True)
+    return items[:limit]
+
+
+def resolve_map_path(mapfile, mapbatch=""):
+    """mapfile 可以是输出目录里的文件名，也可以是手输的本地路径。找不到返回 None。"""
+    name = str(mapfile or "").strip().strip('"')
+    mapbatch = str(mapbatch or "")
+    if not name:
+        return None
+    if os.path.isabs(name) or "/" in name or "\\" in name:
+        p = os.path.abspath(name)
+        return p if os.path.isfile(p) else None
+    if mapbatch and mapbatch == os.path.basename(mapbatch) and mapbatch not in (".", ".."):
+        p = os.path.join(OUTROOT, mapbatch, name)
+        if os.path.isfile(p):
+            return p
+    for it in list_maps(limit=100000):
+        if it["file"] == name:
+            return os.path.join(OUTROOT, it["batch"], name)
+    return None
+
+
 def do_scrub(payload):
-    """执行脱敏，返回结构化结果。"""
+    """执行脱敏，返回 (结构化结果, HTTP 状态码)。"""
+    # 先验口令再动文件：没有口令，映射表就是明文原文，跑完也留不下。
+    map_pwd, err = _check_password(payload)
+    if err:
+        return err, 400
+
     files = payload.get("files") or []
     if not files:
-        return {"ok": False, "error": "没有收到文件"}
+        return {"ok": False, "error": "没有收到文件"}, 400
 
     words = [w.strip() for w in (payload.get("words") or "").splitlines() if w.strip()]
     aggressive = bool(payload.get("aggressive"))
     # 图片是二进制，文本脱敏碰不到；勾了就整块删，不勾就原样留着并在报告里点名。
     images = "strip" if payload.get("stripImages") else "keep"
-    # 映射表=原文全集。给了口令就加密，没给就是明文（报告里会写死这一条）。
-    map_pwd = payload.get("mapPassword") or ""
 
     stamp = datetime.datetime.now().strftime("%m%d_%H%M%S")
     batch = "gui_" + stamp
@@ -109,6 +191,7 @@ def do_scrub(payload):
     mapper = D.Mapper()
     stats = {"warn_no_run": []}
     results, risks = [], []
+    after_chunks = []
     total = 0
 
     try:
@@ -139,9 +222,10 @@ def do_scrub(payload):
             for kind, line, frag in D.risk_scan(before, after):
                 risks.append({"file": name, "kind": kind, "line": line, "frag": frag})
 
+            after_chunks.append(after)
             total += n
             results.append({"name": name, "out": os.path.basename(dest),
-                            "count": n, "size": len(raw)})
+                            "count": n, "size": len(raw), "text": after})
     finally:
         shutil.rmtree(srcdir, ignore_errors=True)
 
@@ -161,10 +245,8 @@ def do_scrub(payload):
         f.write("\n## 二、各类别命中\n\n| 类别 | 数量 |\n|---|---|\n")
         for k, v in sorted(mapper.stat.items(), key=lambda x: -x[1]):
             f.write("| %s | %d |\n" % (k, v))
-        f.write("\n## 三、映射表\n\n占位符与原文的对应关系见 `%s`，该文件含原文，严禁外发。%s\n"
-                % (mapfile,
-                   "已用口令加密，还原时要输同一个口令；口令丢了就没法还原。"
-                   if map_pwd else "**本次未加密**——拿到它等于拿到原文。"))
+        f.write("\n## 三、映射表\n\n占位符与原文的对应关系见 `%s`，该文件含原文，严禁外发。"
+                "已用口令加密，还原时要输同一个口令；口令丢了就没法还原。\n" % mapfile)
         f.write("\n## 四、残留风险（需人工复核）\n\n")
         if risks:
             f.write("| 文件 | 风险类型 | 行号 | 遮蔽片段 |\n|---|---|---|---|\n")
@@ -174,15 +256,97 @@ def do_scrub(payload):
             f.write("未发现明显残留。\n")
         f.write("\n> 遮蔽片段保留首尾字符以便定位，中间以 * 代替，不代表片段全文安全。\n")
 
+        # Word 里看不见、发出去对方却看得见的东西
+        f.write("\n## 五、Word 元数据与隐藏内容\n\n")
+        metas = [m for _p, m in stats.get("meta", [])]
+        if metas:
+            cleared = sorted({x for m in metas for x in m["metadata_cleared"]})
+            f.write("| 项目 | 处理结果 |\n|---|---|\n")
+            f.write("| 文档属性 | %s |\n" % (
+                "已清空：" + "、".join("`%s`" % x for x in cleared) if cleared else "无"))
+            f.write("| 自定义属性 | 删除 %d 个 |\n"
+                    % sum(m["custom_props_removed"] for m in metas))
+            f.write("| 批注 | 删除 %d 条（comments.xml / people.xml 整份移除） |\n"
+                    % sum(m["comments_removed"] for m in metas))
+            f.write("| 修订 | 接受 %d 处（插入保留、删除丢弃） |\n"
+                    % sum(m["revisions_accepted"] for m in metas))
+            f.write("| 隐藏文字 | %d 处去掉隐藏标记，文字保留并已走脱敏 |\n"
+                    % sum(m["hidden_text_revealed"] for m in metas))
+            f.write("| 修订跟踪 | %s |\n"
+                    % ("已关闭" if any(m["track_revisions_removed"] for m in metas)
+                       else "未开启"))
+        else:
+            f.write("本批没有 .docx，无需处理。\n")
+
     high = [r for r in risks if D.is_high(r["kind"])]
     media_out = [{"file": os.path.basename(p), "name": n.rsplit("/", 1)[-1],
                   "size": s, "mode": m}
                  for p, items, m in stats.get("media", []) for n, s in items]
+
+    # 自动复核：拿映射表里的真值回搜脱敏后的文本。
+    # 这一条比风险清单硬——引擎没认出来的名字会原样留在文本里，用户顺手就发出去了。
+    originals = [raw for (_cat, raw) in mapper.forward]
+    leaks = D.leak_scan("\n".join(after_chunks), originals)
+    metas = [m for _p, m in stats.get("meta", [])]
+    review = {"checked": len({raw for (_cat, raw) in mapper.forward}),
+              "hits": [{"value": v, "count": c} for v, c in leaks],
+              "total": sum(c for _v, c in leaks),
+              # 清掉的东西要回报，不能只在报告里写一行
+              "metadata_cleared": sorted({x for m in metas for x in m["metadata_cleared"]}),
+              "comments_removed": sum(m["comments_removed"] for m in metas),
+              "revisions_accepted": sum(m["revisions_accepted"] for m in metas),
+              "hidden_text_revealed": sum(m["hidden_text_revealed"] for m in metas),
+              "custom_props_removed": sum(m["custom_props_removed"] for m in metas),
+              "docx_cleaned": len(metas)}
+
     return {"ok": True, "dir": outdir, "batch": batch, "total": total, "files": results,
             "stat": mapper.stat, "risks": risks[:200], "riskTotal": len(risks),
             "high": len(high), "mapfile": mapfile, "report": report,
-            "media": media_out, "encrypted": bool(map_pwd),
-            "code": 2 if high else 0}
+            "media": media_out, "encrypted": bool(map_pwd), "review": review,
+            "code": 2 if high else 0}, 200
+
+
+def do_restore_text(payload):
+    """文本级还原：AI 返回的整篇内容贴回来，占位符换回原文。
+
+    返回 (结果对象, HTTP 状态码)。口令错一律 400，绝不让异常冒到 handler 外面。
+    """
+    text = payload.get("text")
+    if not isinstance(text, str) or not text.strip():
+        return {"ok": False, "error": "没有收到要还原的文本"}, 400
+
+    # 口令必填：映射表默认就是加密的，没有口令根本解不开
+    pwd, err = _check_password(payload)
+    if err:
+        return err, 400
+
+    path = resolve_map_path(payload.get("mapfile"), payload.get("mapbatch") or "")
+    if not path:
+        return {"ok": False, "error": "找不到映射表：%s"
+                % (payload.get("mapfile") or "（没选）")}, 400
+    try:
+        with open(path, "r", encoding="utf-8") as f:
+            data = json.load(f)
+    except Exception as e:
+        return {"ok": False, "error": "映射表读不出来：%s" % e}, 400
+
+    if D.is_encrypted(data):
+        try:
+            data = D.decrypt_map(data, pwd)
+        except ValueError:
+            return {"ok": False, "error": "口令不对"}, 400
+        except Exception:
+            return {"ok": False, "error": "映射表损坏，解不开"}, 400
+
+    pairs = []
+    for p in (data.get("pairs") or []):
+        try:
+            pairs.append((p["placeholder"], p["original"]))
+        except (KeyError, TypeError):
+            continue
+    new, n, unk = D.restore_text(text, pairs)
+    return {"ok": True, "text": new, "replaced": n, "unknown": unk,
+            "mapfile": os.path.basename(path)}, 200
 
 
 def do_restore(payload):
@@ -190,17 +354,23 @@ def do_restore(payload):
     raw = base64.b64decode(payload.get("data") or "")
     # 新协议传整份映射表（可能是密文），口令在服务端解；老协议传 pairs，照旧兼容。
     mapdata = payload.get("map")
+    if mapdata is not None:
+        # 只要传了映射表，口令就必填——哪怕是老的明文映射表，
+        # 也不给"不填口令就能还原"留口子。
+        pwd, err = _check_password(payload)
+        if err:
+            return err, 400
     try:
         if mapdata is not None:
             if isinstance(mapdata, str):
                 mapdata = json.loads(mapdata)
             if D.is_encrypted(mapdata):
-                mapdata = D.decrypt_map(mapdata, payload.get("mapPassword") or "")
+                mapdata = D.decrypt_map(mapdata, pwd)
             pairs = mapdata.get("pairs") or []
         else:
             pairs = payload.get("pairs") or []
     except ValueError as e:
-        return {"ok": False, "error": str(e)}
+        return {"ok": False, "error": str(e)}, 400
     pairs = sorted(((p["placeholder"], p["original"]) for p in pairs),
                    key=lambda x: -len(x[0]))
     base, ext = os.path.splitext(name)
@@ -228,7 +398,7 @@ def do_restore(payload):
         with open(dest, "w", encoding="utf-8") as f:
             f.write(text)
 
-    return {"ok": True, "out": os.path.basename(dest), "dir": outdir, "batch": batch}
+    return {"ok": True, "out": os.path.basename(dest), "dir": outdir, "batch": batch}, 200
 
 
 class Handler(BaseHTTPRequestHandler):
@@ -281,6 +451,10 @@ class Handler(BaseHTTPRequestHandler):
 
         if path == "/api/ping":
             self._json({"app": "desens", "port": PORT, "pid": os.getpid()})
+            return
+
+        if path == "/api/maps":
+            self._json({"maps": list_maps()})
             return
 
         if path == "/api/config":
@@ -343,9 +517,16 @@ class Handler(BaseHTTPRequestHandler):
         try:
             with LOCK:
                 if path == "/api/scrub":
-                    self._json(do_scrub(payload))
+                    obj, code = do_scrub(payload)
+                    self._json(obj, code)
                 elif path == "/api/restore":
-                    self._json(do_restore(payload))
+                    # 新协议传 text（整篇粘贴还原），老协议传 name+data（文件还原）。
+                    # 按字段分流，老调用方一行都不用改。
+                    if "text" in payload:
+                        obj, code = do_restore_text(payload)
+                    else:
+                        obj, code = do_restore(payload)
+                    self._json(obj, code)
                 elif path == "/api/opendir":
                     d = LAST.get("dir")
                     if d and os.path.isdir(d):

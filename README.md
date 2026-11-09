@@ -27,9 +27,13 @@
 输出三样东西：
 
 - `<原名>_脱敏.docx` —— 可以外发的版本
-- `映射表_<时间>.json` —— **含原文，能还原，严禁外发**。默认用口令加密（PBKDF2 +
+- `映射表_<时间>.json` —— **含原文，能还原，严禁外发**。强制用口令加密（PBKDF2 +
   HMAC-SHA256，纯标准库），没有口令打不开，误发出去也不至于全盘皆输
 - `脱敏报告_<时间>.md` —— 替换了什么、哪里可能还有残留，**不含原文**
+
+Word 文件还会顺带清掉 Word 里看不见、发出去对方却看得见的东西：作者、最后修改人、
+公司、标题/主题/备注、自定义属性、批注和批注作者、修订记录（接受修订）、隐藏文字
+（去掉隐藏标记、文字保留并照常脱敏），并关掉修订跟踪。细节记在报告第五节。
 
 需要还原时，拿脱敏件 + 映射表 + 脱敏时设的口令，一条命令换回原文（只在本地用）。
 
@@ -81,14 +85,15 @@ python desensitize_server.py
 **命令行**（适合批处理）：
 
 ```bash
-python desensitize.py 客户端资料.docx
-python desensitize.py 客户端资料/ -o out/desens
-python desensitize.py 资料.docx --dict 敏感词表.txt      # 补充自己的词表，最可靠
-python desensitize.py 资料.docx --aggressive             # 激进模式
-python desensitize.py 资料.docx --images strip           # docx 里的图直接删掉
-python desensitize.py 资料.docx --map-password 口令       # 映射表加密（推荐）
+python desensitize.py 客户端资料.docx --map-password 口令   # 口令必填，至少 6 位
+python desensitize.py 客户端资料/ -o out/desens --map-password 口令
+python desensitize.py 资料.docx --dict 敏感词表.txt --map-password 口令   # 补充自己的词表，最可靠
+python desensitize.py 资料.docx --aggressive --map-password 口令          # 激进模式
+python desensitize.py 资料.docx --images strip --map-password 口令        # docx 里的图直接删掉
 python desensitize.py 脱敏版.docx --restore out/desens/映射表_xxx.json --map-password 口令
 ```
+
+映射表口令是**硬要求**：不传就不跑。映射表里是原文对照，明文落盘等于没脱敏。
 
 退出码：`0` 正常；`2` 有高风险残留，需要人工复核。
 
