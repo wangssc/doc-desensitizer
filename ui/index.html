@@ -245,16 +245,16 @@ header .tag{font-size:12px; color:#a8c6e6}
         <div class="big">把脱敏文件拖到这里，或点击选择</div>
         <div class="small">还原后会生成「原名_还原」文件</div>
       </div>
-      <input type="file" id="picker2" accept=".docx,.txt,.md,.csv" class="hidden">
+      <input type="file" id="picker2" accept=".docx,.txt,.md,.csv,.json,application/json" class="hidden">
       <div class="files" id="files2"></div>
     </div>
     <div class="card">
       <h2><span class="n">2</span>映射表 json</h2>
       <div class="drop" id="drop3">
         <div class="big">选择脱敏时生成的映射表</div>
-        <div class="small">文件名形如 映射表_1107_1030.json</div>
+        <div class="small">脱敏时生成的 .json，改过名也认；选错了会直接说</div>
       </div>
-      <input type="file" id="picker3" accept=".json" class="hidden">
+      <input type="file" id="picker3" class="hidden">
       <div class="files" id="files3"></div>
       <div class="row" id="rpwdrow" style="margin-top:10px">
         <input type="password" id="restorePwd" class="pw" autocomplete="off"
@@ -283,7 +283,7 @@ header .tag{font-size:12px; color:#a8c6e6}
 
 <script>
 const $ = s => document.querySelector(s);
-let files = [], rfile = null, rmap = null, rmapText = null, rmapEnc = false;
+let files = [], rfile = null, rmap = null, rmapText = null, rmapEnc = false, rmapOk = false;
 
 /* 复制给 AI 时附带的提示词：AI 爱把 [人员1] 改成 [人员 1] 或翻译掉，加这句能少一半返工 */
 const PROMPT = '下面是一份文档。其中方括号加编号的是占位符（例如 [人员1]、[单位2]、[IP1]），\n'
@@ -343,6 +343,7 @@ const fmt = n => n > 1048576 ? (n/1048576).toFixed(1)+' MB'
 // 与后端 desensitize.py 一致：.txt/.md/.csv/.docx（第 805、815 行）
 const OK_EXT = ['.docx', '.txt', '.md', '.csv'];
 const extOk = n => OK_EXT.some(e => String(n).toLowerCase().endsWith(e));
+const isJson = n => String(n).toLowerCase().endsWith('.json');
 
 // readEntries 一次最多返回 100 项，返回空数组才算读完，必须循环
 function readAllEntries(reader){
@@ -358,25 +359,25 @@ function readAllEntries(reader){
 }
 
 // 递归展开目录；子目录也要进
-async function collectEntry(entry, out, skipped){
+async function collectEntry(entry, out, skipped, okFn){
   if (!entry) return;
   if (entry.isFile) {
     const f = await new Promise((res, rej) => entry.file(res, rej));
-    if (extOk(f.name)) out.push(f); else skipped.push(f.name);
+    if (okFn(f.name)) out.push(f); else skipped.push(f.name);
     return;
   }
   if (entry.isDirectory) {
     const ents = await readAllEntries(entry.createReader());
-    for (const e of ents) await collectEntry(e, out, skipped);
+    for (const e of ents) await collectEntry(e, out, skipped, okFn);
   }
 }
 
-function wireDrop(dropEl, inputEl, onFiles){
+function wireDrop(dropEl, inputEl, onFiles, okFn = extOk){
   dropEl.onclick = () => inputEl.click();
   inputEl.onchange = () => {
     if (inputEl.files.length) {
       const out = [], skipped = [];
-      [...inputEl.files].forEach(f => extOk(f.name) ? out.push(f) : skipped.push(f.name));
+      [...inputEl.files].forEach(f => okFn(f.name) ? out.push(f) : skipped.push(f.name));
       onFiles(out, skipped);
       inputEl.value = '';
     }
@@ -402,14 +403,14 @@ function wireDrop(dropEl, inputEl, onFiles){
     if (entries.length) {
       dropEl.classList.add('reading');
       try {
-        for (const e of entries) await collectEntry(e, out, skipped);
+        for (const e of entries) await collectEntry(e, out, skipped, okFn);
       } finally {
         dropEl.classList.remove('reading');
       }
     } else {
       // 不支持 entry API 时兜底：目录在这里读不出来，但普通文件仍可用
       for (const f of [...ev.dataTransfer.files]) {
-        extOk(f.name) ? out.push(f) : skipped.push(f.name);
+        okFn(f.name) ? out.push(f) : skipped.push(f.name);
       }
     }
     if (out.length || skipped.length) onFiles(out, skipped);
@@ -476,12 +477,15 @@ wireDrop($('#drop'), $('#picker'), (fs, skipped) => {
 /* ---------- 还原：两个文件位 ---------- */
 // 映射表可能是加密的：读一眼 format 就知道要不要口令，别等点还原才报错
 async function checkMap(f){
-  rmapText = null; rmapEnc = false;
+  rmapText = null; rmapEnc = false; rmapOk = false;
   try {
     const t = await f.text();
-    rmapEnc = (JSON.parse(t) || {}).format === 'desens-map-v2';
-    rmapText = t;
-  } catch (e) { rmapEnc = false; rmapText = null; }
+    const d = JSON.parse(t) || {};
+    rmapEnc = d.format === 'desens-map-v2';
+    // 老版本明文映射表没有 format，靠 pairs 认；内容对不上的 json 一律不算映射表
+    rmapOk = rmapEnc || Array.isArray(d.pairs);
+    if (rmapOk) rmapText = t;
+  } catch (e) { rmapEnc = false; rmapOk = false; rmapText = null; }
   $('#restorePwd').value = '';
   syncGo2();
 }
@@ -493,20 +497,50 @@ function syncGo2(){
 $('#restorePwd').addEventListener('input', syncGo2);
 syncGo2();
 
-function wireSingle(dropEl, inputEl, boxEl, which){
-  wireDrop(dropEl, inputEl, (fs, skipped) => {
-    const f = fs[0];
-    if (!f) {
-      boxEl.innerHTML = `<div class="hint warn">没有可用的文件（支持 .docx / .txt / .md / .csv）</div>`;
-      return;
-    }
-    if (which === 'file') rfile = f; else { rmap = f; checkMap(f); }
-    boxEl.innerHTML = `<div class="file"><span class="nm">${esc(f.name)}</span>
+const MSG_NOT_MAP = '这不是映射表，映射表是脱敏时生成的 .json 文件';
+const MSG_MAP_HERE = '这是映射表，请放到下面第 2 格「映射表 json」';
+const fileRow = f => `<div class="file"><span class="nm">${esc(f.name)}</span>
       <span class="sz">${fmt(f.size)}</span></div>`;
-  });
+
+/* 收下第 2 格的映射表：内容不对就不认，rmap 置空让「开始还原」拦下来 */
+async function takeMap(f){
+  rmap = f;
+  const box = $('#files3');
+  box.innerHTML = fileRow(f);
+  await checkMap(f);
+  if (!rmapOk) {
+    rmap = null;
+    box.innerHTML = fileRow(f) + `<div class="hint danger">${MSG_NOT_MAP}</div>`;
+  }
 }
-wireSingle($('#drop2'), $('#picker2'), $('#files2'), 'file');
-wireSingle($('#drop3'), $('#picker3'), $('#files3'), 'map');
+
+// 第 1 格：脱敏文件。拖进来的 .json 十有八九是映射表，不能静默丢掉——
+// 直接挪到第 2 格并说清楚，用户拖错了不该让他再拖一遍。
+wireDrop($('#drop2'), $('#picker2'), fs => {
+  const box = $('#files2');
+  const jsons = fs.filter(f => isJson(f.name));
+  const docs = fs.filter(f => !isJson(f.name));
+  if (docs.length) rfile = docs[0];
+  let html = rfile ? fileRow(rfile) : '';
+  if (jsons.length) {
+    takeMap(jsons[0]);
+    html += `<div class="hint danger">${MSG_MAP_HERE}（已自动填好）</div>`;
+  } else if (!docs.length && !rfile) {
+    html = '<div class="hint warn">没有可用的文件（支持 .docx / .txt / .md / .csv）</div>';
+  }
+  box.innerHTML = html;
+}, n => extOk(n) || isJson(n));
+
+// 第 2 格：映射表。不限扩展名，先接住再按内容判断——
+// Windows 的打开对话框按 accept 过滤，.json 有可能干脆看不见，那也会被当成"不支持"。
+wireDrop($('#drop3'), $('#picker3'), fs => {
+  if (!fs.length) {
+    $('#files3').innerHTML = `<div class="hint danger">${MSG_NOT_MAP}</div>`;
+    rmap = null; rmapText = null; rmapOk = false; syncGo2();
+    return;
+  }
+  takeMap(fs[0]);
+}, () => true);
 mountRestore($('#textRestoreHost'), {});   // 「还原」标签页的整篇粘贴还原
 
 /* ---------- 执行脱敏 ---------- */
@@ -880,8 +914,10 @@ if (location.hash === '#demo') {
 }
 
 $('#go2').onclick = async () => {
-  if (!rfile) { alert('先选脱敏文件。'); return; }
-  if (!rmap) { alert('先选映射表。'); return; }
+  // 缺哪样说哪样：笼统报「还原失败」用户不知道该补第 1 格还是第 2 格
+  if (!rfile) { alert('请先把脱敏后的文件拖到第 1 格。'); return; }
+  if (!rmap) { alert('请先选映射表（脱敏时生成的 .json）。'); return; }
+  if (!rmapOk) { alert(MSG_NOT_MAP + '。'); return; }
   const mapPwd = $('#restorePwd').value;
   if (mapPwd.trim().length < PWD_MIN) {
     alert('先填映射表口令（至少 ' + PWD_MIN + ' 位）。映射表是加密的，没有口令解不开。');

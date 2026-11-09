@@ -131,9 +131,13 @@ def list_maps(limit=20):
         except OSError:
             continue
         for fn in names:
-            if not (fn.startswith("映射表_") and fn.endswith(".json")):
+            # 按内容认，不按文件名认：用户把 映射表_xxx.json 改成「备份.json」
+            # 或者换个目录放着，只要文件头里还是 desens-map-v2 就该能列出来。
+            if not fn.lower().endswith(".json"):
                 continue
             p = os.path.join(d, fn)
+            if not _peek_encrypted(p):
+                continue
             try:
                 st = os.stat(p)
             except OSError:
