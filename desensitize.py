@@ -1515,9 +1515,46 @@ def _heading_title_spans(text):
     return spans
 
 
+# 报告编号：Z2T-D2607-076-DSM-13-RPT / RM-D2607-076/2
+# 整串当实体脱掉，不让 AI 看到里面的机构缩写自己编占位符
+RE_REPORT_ID = re.compile(
+    r"(?<![A-Za-z0-9_/-])"
+    r"[A-Z][A-Z0-9]{1,5}(?:-[A-Za-z0-9]{1,12}){2,}"
+    r"(?:-RPT|/[0-9]{1,4})?"
+    r"(?![A-Za-z0-9_/-])"
+)
+# 标准号/算法名前缀：命中这些就不是报告编号（按前缀匹配，PBKDF2 也归 PBKDF）
+REPORT_ID_SKIP_PREFIX = ("GB", "GM", "GA", "ISO", "IEC", "IEEE", "RFC", "SM",
+                         "HMAC", "SHA", "PBKDF", "AES", "RSA", "ECC", "ZUC",
+                         "TLS", "SSL", "DES", "MD5", "CRC")
+
+
+def find_report_ids(text):
+    """报告编号整串识别。标准号（GB/T、GM/T）与纯数字日期一律排除。"""
+    out = []
+    for m in RE_REPORT_ID.finditer(text):
+        raw = m.group(0)
+        segs = raw.split("-")
+        # 整串必须至少含一个纯字母段（机构代码）和一个数字字符
+        if not any(ch.isdigit() for ch in raw):
+            continue
+        if not any(s.isalpha() and 2 <= len(s) <= 6 for s in segs):
+            continue
+        head = segs[0].upper()
+        if any(head.startswith(p) for p in REPORT_ID_SKIP_PREFIX):
+            continue
+        # 纯数字段占比过高 → 日期或版本号，不是编号
+        num = sum(1 for s in segs if s.isdigit())
+        if num >= len(segs) - 1:
+            continue
+        out.append((m.start(), m.end(), "编号", raw))
+    return out
+
+
 def collect(text, custom_words=(), aggressive=False, ctx=None, strict_docid=False):
     """返回命中列表 [(start, end, cat, raw)]，已按优先级处理重叠。"""
     hits = []
+    hits += find_report_ids(text)
     hits += find_lexicon(text, ctx)
     hits += find_custom(text, custom_words)
     hits += find_plans(text)
@@ -1558,11 +1595,10 @@ def collect(text, custom_words=(), aggressive=False, ctx=None, strict_docid=Fals
     # 白名单只挡独立成词的那一个词，不影响它前后的真实实体
     hits = filter_whitelist(text, hits)
 
-    # 文档自身编号保护：报告编号/控制编号不是敏感信息
-    doc_ids = _doc_id_spans(text, strict_docid)
-    if doc_ids:
-        hits = [h for h in hits
-                if not any(h[0] < pe and h[1] > ps for ps, pe in doc_ids)]
+    # 2026-11-10 反转：报告编号里含机构代码（Z2T）和项目号，属于敏感信息。
+    # 旧规则把它保护起来，结果 AI 看到后自己编了 [机构代码]/[序号] 占位符，
+    # 映射表里没有这两条，还原必然失败。现在整串脱成 [编号N]，由 find_report_ids 负责。
+    # （_doc_id_spans 保留但不再调用）
 
     # 标准号保护：任何与标准号重叠的命中一律丢弃。
     # 用二分而不是内层遍历——几万个命中 × 几百个标准号会直接卡死。
