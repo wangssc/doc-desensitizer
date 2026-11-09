@@ -29,6 +29,7 @@ import argparse
 import base64
 import bisect
 import datetime
+import difflib
 import hashlib
 import hmac
 import json
@@ -2020,18 +2021,58 @@ def _para_text(block):
     return "".join(_xml_unescape(m.group(2)) for m in RE_T.finditer(block))
 
 
+def _distribute_runs(olds, new):
+    """把 new 按原 run 的字符区间分回去，返回每个 run 的新文字。
+
+    只改动与差异区间重叠的 run，其余 run 原样不动。这一点很关键：
+    段落里除了 <w:t> 还有 <w:noBreakHyphen/>、<w:tab/>、域代码（fldChar /
+    instrText）这类行内元素，它们不属于任何 <w:t>。若把整段文字塞进第一个
+    <w:t>、清空其余，这些元素就会从原位置被挤到段尾（"图 2-1" 变 "图 21 …-"）。
+    """
+    bounds, pos = [], 0
+    for s in olds:
+        bounds.append((pos, pos + len(s)))
+        pos += len(s)
+    outs = [""] * len(olds)
+    if not bounds:
+        return outs
+
+    def owner(p):
+        for i, (a, b) in enumerate(bounds):
+            if a <= p < b:
+                return i
+        return len(bounds) - 1
+
+    sm = difflib.SequenceMatcher(None, "".join(olds), new, autojunk=False)
+    for tag, i1, i2, j1, j2 in sm.get_opcodes():
+        if tag == "equal":
+            for i, (a, b) in enumerate(bounds):
+                lo, hi = max(a, i1), min(b, i2)
+                if lo < hi:
+                    outs[i] += new[j1 + lo - i1: j1 + hi - i1]
+        elif tag == "replace":
+            # 替换文本整块放进第一个被覆盖的 run；同一 run 内的其余字符不受影响
+            tgt = next((i for i, (a, b) in enumerate(bounds)
+                        if max(a, i1) < min(b, i2)), None)
+            outs[tgt if tgt is not None else owner(i1)] += new[j1:j2]
+        elif tag == "insert":
+            outs[owner(i1)] += new[j1:j2]
+    return outs
+
+
 def _set_para_text(block, new):
-    """整段文字写进第一个 <w:t>，其余 <w:t> 清空。无 <w:t> 则原样返回。"""
+    """按原 run 的字符区间写入新文字，保留 run 边界。无 <w:t> 则原样返回。"""
     # 自闭合的 <w:t/> 不匹配 RE_T，段落里有它就会整段写不进去 = 漏脱。
     # 先展开成成对标签，再走正常替换。
     block = RE_T_SELF.sub(lambda m: "<w:t%s></w:t>" % (m.group(1) or ""), block)
     ts = list(RE_T.finditer(block))
     if not ts:
         return block
+    parts = _distribute_runs([_xml_unescape(m.group(2)) for m in ts], new)
     out, last = [], 0
-    for i, m in enumerate(ts):
+    for m, txt in zip(ts, parts):
         out.append(block[last:m.start(2)])
-        out.append(_xml_escape(new) if i == 0 else "")
+        out.append(_xml_escape(txt))
         last = m.end(2)
     out.append(block[last:])
     return "".join(out)
