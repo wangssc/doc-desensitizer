@@ -94,6 +94,8 @@ def do_scrub(payload):
     aggressive = bool(payload.get("aggressive"))
     # 图片是二进制，文本脱敏碰不到；勾了就整块删，不勾就原样留着并在报告里点名。
     images = "strip" if payload.get("stripImages") else "keep"
+    # 映射表=原文全集。给了口令就加密，没给就是明文（报告里会写死这一条）。
+    map_pwd = payload.get("mapPassword") or ""
 
     stamp = datetime.datetime.now().strftime("%m%d_%H%M%S")
     batch = "gui_" + stamp
@@ -145,7 +147,7 @@ def do_scrub(payload):
 
     mapfile = "映射表_%s.json" % stamp
     with open(os.path.join(outdir, mapfile), "w", encoding="utf-8") as f:
-        json.dump(mapper.dump(), f, ensure_ascii=False, indent=2)
+        json.dump(mapper.dump(map_pwd), f, ensure_ascii=False, indent=2)
 
     report = "脱敏报告_%s.md" % stamp
     with open(os.path.join(outdir, report), "w", encoding="utf-8") as f:
@@ -159,7 +161,10 @@ def do_scrub(payload):
         f.write("\n## 二、各类别命中\n\n| 类别 | 数量 |\n|---|---|\n")
         for k, v in sorted(mapper.stat.items(), key=lambda x: -x[1]):
             f.write("| %s | %d |\n" % (k, v))
-        f.write("\n## 三、映射表\n\n占位符与原文的对应关系见 `%s`，该文件含原文，严禁外发。\n" % mapfile)
+        f.write("\n## 三、映射表\n\n占位符与原文的对应关系见 `%s`，该文件含原文，严禁外发。%s\n"
+                % (mapfile,
+                   "已用口令加密，还原时要输同一个口令；口令丢了就没法还原。"
+                   if map_pwd else "**本次未加密**——拿到它等于拿到原文。"))
         f.write("\n## 四、残留风险（需人工复核）\n\n")
         if risks:
             f.write("| 文件 | 风险类型 | 行号 | 遮蔽片段 |\n|---|---|---|---|\n")
@@ -169,21 +174,33 @@ def do_scrub(payload):
             f.write("未发现明显残留。\n")
         f.write("\n> 遮蔽片段保留首尾字符以便定位，中间以 * 代替，不代表片段全文安全。\n")
 
-    high = [r for r in risks if r["kind"].startswith("疑似机构名") or r["kind"].startswith("疑似地名")]
+    high = [r for r in risks if D.is_high(r["kind"])]
     media_out = [{"file": os.path.basename(p), "name": n.rsplit("/", 1)[-1],
                   "size": s, "mode": m}
                  for p, items, m in stats.get("media", []) for n, s in items]
     return {"ok": True, "dir": outdir, "batch": batch, "total": total, "files": results,
             "stat": mapper.stat, "risks": risks[:200], "riskTotal": len(risks),
             "high": len(high), "mapfile": mapfile, "report": report,
-            "media": media_out,
+            "media": media_out, "encrypted": bool(map_pwd),
             "code": 2 if high else 0}
 
 
 def do_restore(payload):
     name = os.path.basename(payload.get("name") or "file")
     raw = base64.b64decode(payload.get("data") or "")
-    pairs = payload.get("pairs") or []
+    # 新协议传整份映射表（可能是密文），口令在服务端解；老协议传 pairs，照旧兼容。
+    mapdata = payload.get("map")
+    try:
+        if mapdata is not None:
+            if isinstance(mapdata, str):
+                mapdata = json.loads(mapdata)
+            if D.is_encrypted(mapdata):
+                mapdata = D.decrypt_map(mapdata, payload.get("mapPassword") or "")
+            pairs = mapdata.get("pairs") or []
+        else:
+            pairs = payload.get("pairs") or []
+    except ValueError as e:
+        return {"ok": False, "error": str(e)}
     pairs = sorted(((p["placeholder"], p["original"]) for p in pairs),
                    key=lambda x: -len(x[0]))
     base, ext = os.path.splitext(name)

@@ -80,6 +80,10 @@ header .tag{font-size:12px; color:#a8c6e6}
   textarea:focus, input:focus{outline:2px solid #cfe3fb; border-color:var(--brand2)}
   .hint{font-size:12px; color:var(--sub); margin-top:6px}
   .hint.warn{color:var(--warn)}
+  .pw{
+    flex:1; min-width:200px; padding:8px 10px; font-size:13px; font-family:inherit;
+    border:1px solid var(--line); border-radius:7px; background:#fcfdff;
+  }
   .row{display:flex; align-items:center; gap:12px; flex-wrap:wrap}
   .btn{
     border:1px solid var(--line); background:#fff; color:var(--ink);
@@ -194,6 +198,9 @@ header .tag{font-size:12px; color:#a8c6e6}
         <div style="display:flex;flex-direction:column;gap:6px">
           <label class="chk"><input type="checkbox" id="aggr"> 激进模式（连没有上下文的疑似人名也脱，误杀更多）</label>
           <label class="chk"><input type="checkbox" id="stripimg"> 移除文档里的图片（Word 里的图脱不到，图上的 IP、系统名全留着）</label>
+          <label class="chk"><input type="checkbox" id="encmap" checked> 加密映射表（映射表里就是原文，加密后误发出去也打不开）</label>
+          <input type="password" id="mappwd" class="pw" autocomplete="new-password"
+                 placeholder="映射表口令（还原时要用同一个，丢了还原不回来）" style="max-width:420px">
         </div>
         <div style="display:flex;flex-direction:column;align-items:flex-end;gap:4px">
           <button class="btn primary" id="go">开 始 脱 敏</button>
@@ -224,6 +231,10 @@ header .tag{font-size:12px; color:#a8c6e6}
       </div>
       <input type="file" id="picker3" accept=".json" class="hidden">
       <div class="files" id="files3"></div>
+      <div class="row hidden" id="rpwdrow" style="margin-top:10px">
+        <input type="password" id="restorePwd" class="pw" autocomplete="off"
+               placeholder="映射表口令（脱敏时设的那个）">
+      </div>
       <div class="hint warn">还原后的文件等于原始资料，注意存放在哪台机器、哪个目录。</div>
     </div>
     <div class="card">
@@ -238,15 +249,22 @@ header .tag{font-size:12px; color:#a8c6e6}
     <div class="ico">⚠</div>
     <div>
       <p class="t">映射表里存的是原文，拿到它就能把脱敏件还原回去</p>
-      <p class="s">它和脱敏件一起发出去，等于没脱敏。对外只发带「_脱敏」的文件；
-        映射表只在需要还原时用，用完单独存放或删掉，别跟脱敏件放在同一个文件夹里。</p>
+      <p class="s">它和脱敏件一起发出去，等于没脱敏。默认会用你填的口令加密，但口令别跟着文件走——
+        对外只发带「_脱敏」的文件；映射表只在需要还原时用，用完单独存放或删掉，别跟脱敏件放在同一个文件夹里。</p>
     </div>
   </div>
 </main>
 
 <script>
 const $ = s => document.querySelector(s);
-let files = [], rfile = null, rmap = null;
+let files = [], rfile = null, rmap = null, rmapText = null, rmapEnc = false;
+
+/* 映射表加密：勾着就必须给口令，不给就别开始——否则落盘的还是明文原文 */
+$('#encmap').onchange = () => {
+  const on = $('#encmap').checked;
+  $('#mappwd').style.display = on ? '' : 'none';
+  if (on) $('#mappwd').focus();
+};
 
 /* ---------- 标签切换 ---------- */
 document.querySelectorAll('.tab').forEach(t => t.onclick = () => {
@@ -403,6 +421,18 @@ wireDrop($('#drop'), $('#picker'), (fs, skipped) => {
 });
 
 /* ---------- 还原：两个文件位 ---------- */
+// 映射表可能是加密的：读一眼 format 就知道要不要口令，别等点还原才报错
+async function checkMap(f){
+  rmapText = null; rmapEnc = false;
+  try {
+    const t = await f.text();
+    rmapEnc = (JSON.parse(t) || {}).format === 'desens-map-v2';
+    rmapText = t;
+  } catch (e) { rmapEnc = false; rmapText = null; }
+  $('#rpwdrow').classList.toggle('hidden', !rmapEnc);
+  $('#restorePwd').value = '';
+}
+
 function wireSingle(dropEl, inputEl, boxEl, which){
   wireDrop(dropEl, inputEl, (fs, skipped) => {
     const f = fs[0];
@@ -410,7 +440,7 @@ function wireSingle(dropEl, inputEl, boxEl, which){
       boxEl.innerHTML = `<div class="hint warn">没有可用的文件（支持 .docx / .txt / .md / .csv）</div>`;
       return;
     }
-    if (which === 'file') rfile = f; else rmap = f;
+    if (which === 'file') rfile = f; else { rmap = f; checkMap(f); }
     boxEl.innerHTML = `<div class="file"><span class="nm">${esc(f.name)}</span>
       <span class="sz">${fmt(f.size)}</span></div>`;
   });
@@ -421,6 +451,14 @@ wireSingle($('#drop3'), $('#picker3'), $('#files3'), 'map');
 /* ---------- 执行脱敏 ---------- */
 $('#go').onclick = async () => {
   if (!files.length) { alert('先选文件。'); return; }
+  const mapPwd = $('#mappwd').value;
+  if ($('#encmap').checked && !mapPwd.trim()) {
+    alert('勾了「加密映射表」但没填口令。\n\n'
+      + '填一个口令（还原时要用同一个，丢了还原不回来）；'
+      + '确实不想加密就取消勾选——那样映射表是明文原文，别和脱敏件一起发出去。');
+    $('#mappwd').focus();
+    return;
+  }
   const totalBytes = files.reduce((s, f) => s + f.size, 0);
   const totalMB = totalBytes / 1048576;
 
@@ -462,7 +500,8 @@ $('#go').onclick = async () => {
   const timer = setTimeout(() => ac.abort(), timeoutMs);
   try {
     const payload = { files: [], words: $('#words').value, aggressive: $('#aggr').checked,
-                      stripImages: $('#stripimg').checked };
+                      stripImages: $('#stripimg').checked,
+                      mapPassword: $('#encmap').checked ? mapPwd : '' };
     for (let i = 0; i < files.length; i++) {
       const f = files[i];
       setProg(`读取 ${i + 1}/${files.length}：${f.name}`);
@@ -492,7 +531,7 @@ $('#go').onclick = async () => {
 
 function renderResult(d){
   const okBanner = d.high > 0
-    ? `<div class="banner warn">已完成，但有 <b>${d.high}</b> 条高置信残留（机构名或地名）。
+    ? `<div class="banner warn">已完成，但有 <b>${d.high}</b> 条高置信残留（机构名 / 地名 / 平台类单位名）。
        把对应词加进敏感词表再跑一次，或人工核对报告第四节。</div>`
     : `<div class="banner ok">已完成，未发现高置信残留。可以直接把「_脱敏」文件发出去。</div>`;
 
@@ -542,7 +581,9 @@ function renderResult(d){
     </div>` : ''}
     <div class="card" style="border-color:#f0b4b4;background:#fdfafa">
       <h2 style="color:var(--danger)">映射表（仅本机，切勿外发）</h2>
-      <div class="hint warn">这个文件含全部原文。它只在你要还原时用得上，任何情况下都不要发给别人、不要上传网盘。</div>
+      <div class="hint ${d.encrypted ? '' : 'warn'}">${d.encrypted
+        ? '已用口令加密。别人拿到文件也打不开；你自己还原时要输同一个口令，口令丢了还原不回来。'
+        : '这个文件是明文的，里面就是全部原文。它只在你要还原时用得上，任何情况下都不要发给别人、不要上传网盘。'}</div>
       <div class="dl" style="margin-top:10px">
         <a class="danger" href="/dl?d=${encodeURIComponent(d.batch)}&f=${encodeURIComponent(d.mapfile)}">下载映射表</a>
       </div>
@@ -575,16 +616,18 @@ if (location.hash === '#demo') {
 $('#go2').onclick = async () => {
   if (!rfile) { alert('先选脱敏文件。'); return; }
   if (!rmap) { alert('先选映射表。'); return; }
+  const mapPwd = $('#restorePwd').value;
+  if (rmapEnc && !mapPwd.trim()) { alert('这份映射表是加密的，先填口令。'); $('#restorePwd').focus(); return; }
   const btn = $('#go2');
   btn.disabled = true;
   btn.innerHTML = '<span class="loading"></span>正在还原…';
   try {
-    const mapText = await rmap.text();
-    const mapJson = JSON.parse(mapText);
+    const mapText = rmapText || await rmap.text();
     const payload = {
       name: rfile.name,
       data: await readBase64(rfile),
-      pairs: mapJson.pairs || []
+      map: mapText,
+      mapPassword: rmapEnc ? mapPwd : ''
     };
     const r = await fetch('/api/restore', {
       method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify(payload)

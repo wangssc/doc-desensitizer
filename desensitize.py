@@ -16,14 +16,21 @@
     # 3) 还原（把占位符换回原文，仅在本地用）
     python desensitize.py 脱敏版.docx --restore out/desens/映射表_xxx.json
 
+    # 4) 映射表加密（映射表=原文全集，和脱敏件一起发出去等于没脱）
+    python desensitize.py 资料.docx --map-password 自定口令
+    python desensitize.py 脱敏版.docx --restore 映射表_xxx.json --map-password 自定口令
+
 输出：
     脱敏文件 + 映射表_<时间>.json（含原文，严禁外发）+ 脱敏报告.md（不含原文）
 
 退出码：0 正常；2 有高风险残留（提示人工复核）
 """
 import argparse
+import base64
 import bisect
 import datetime
+import hashlib
+import hmac
 import json
 import os
 import re
@@ -61,13 +68,75 @@ class Mapper:
         self.stat[cat] = self.stat.get(cat, 0) + 1
         return ph
 
-    def dump(self):
-        return {
+    def dump(self, password=None):
+        """password 非空则加密。映射表=原文全集，明文落盘的代价是全盘皆输。"""
+        body = {
             "created": datetime.datetime.now().isoformat(timespec="seconds"),
             "note": "此文件包含原文，仅限本地保存，严禁外发。",
             "pairs": [{"category": c, "placeholder": p, "original": o}
                       for (c, o), p in self.forward.items()],
         }
+        return encrypt_map(body, password) if password else body
+
+
+# ---------------------------------------------------------------- 映射表加密
+# 标准库里没有 AES，所以用 PBKDF2-HMAC-SHA256 派生两把密钥，
+# 一把用 HMAC-SHA256 作计数器生成密钥流异或（等价 CTR 模式），另一把做
+# 加密后校验。这挡的是"误把映射表当附件发出去"这一类事故，不是抗定向破解。
+MAP_FORMAT = "desens-map-v2"
+MAP_ITER = 200000
+
+
+def _keystream(key, nonce, n):
+    buf = bytearray()
+    ctr = 0
+    while len(buf) < n:
+        buf += hmac.new(key, nonce + ctr.to_bytes(8, "big"), hashlib.sha256).digest()
+        ctr += 1
+    return bytes(buf[:n])
+
+
+def _derive(password, salt):
+    dk = hashlib.pbkdf2_hmac("sha256", password.encode("utf-8"), salt, MAP_ITER, 64)
+    return dk[:32], dk[32:]
+
+
+def encrypt_map(body, password):
+    salt, nonce = os.urandom(16), os.urandom(16)
+    enc_key, mac_key = _derive(password, salt)
+    raw = json.dumps(body, ensure_ascii=False).encode("utf-8")
+    ct = bytes(a ^ b for a, b in zip(raw, _keystream(enc_key, nonce, len(raw))))
+    tag = hmac.new(mac_key, nonce + ct, hashlib.sha256).digest()
+    b64 = lambda b: base64.b64encode(b).decode("ascii")
+    return {"format": MAP_FORMAT, "kdf": "pbkdf2-hmac-sha256", "iterations": MAP_ITER,
+            "cipher": "hmac-sha256-ctr", "salt": b64(salt), "nonce": b64(nonce),
+            "tag": b64(tag), "data": b64(ct)}
+
+
+def is_encrypted(data):
+    return isinstance(data, dict) and data.get("format") == MAP_FORMAT
+
+
+def decrypt_map(data, password):
+    """口令错/文件被改过都抛 ValueError，绝不返回半份原文。"""
+    if not password:
+        raise ValueError("映射表已加密，需要输入口令")
+    salt = base64.b64decode(data.get("salt") or "")
+    nonce = base64.b64decode(data.get("nonce") or "")
+    ct = base64.b64decode(data.get("data") or "")
+    tag = base64.b64decode(data.get("tag") or "")
+    enc_key, mac_key = _derive(password, salt)
+    if not hmac.compare_digest(tag, hmac.new(mac_key, nonce + ct, hashlib.sha256).digest()):
+        raise ValueError("口令不对，或映射表已被改动")
+    raw = bytes(a ^ b for a, b in zip(ct, _keystream(enc_key, nonce, len(ct))))
+    return json.loads(raw.decode("utf-8"))
+
+
+def load_map(path, password=None):
+    """读映射表；老版本明文 JSON 照常读，不要求口令。"""
+    with open(path, "r", encoding="utf-8") as fh:
+        data = json.load(fh)
+    return decrypt_map(data, password) if is_encrypted(data) else data
 
 
 # ---------------------------------------------------------------- 识别规则
@@ -508,6 +577,11 @@ def scrub(text, mapper, custom_words=(), aggressive=False):
 
 HIGH_RISK = [
     ("疑似机构名（未命中后缀规则）", re.compile(r"[\u4e00-\u9fa5]{2,8}(?:分院|院区|校区|园区|分部|分公司|办事处|分中心)")),
+    # 单位后缀表里没有"平台"，"××市××云平台"这类名字整串漏脱且用户毫无察觉。
+    # 不改进识别规则（会误伤"云平台""数据平台"这类通用词），只把它摆到残留清单里：
+    # 前面挂省市区的平台名，几乎只能是具体的单位/系统名。
+    ("疑似平台类单位名（后缀表未覆盖，需加词表）",
+     re.compile(r"[\u4e00-\u9fa5]{2,3}(?:省|市|区|县)[\u4e00-\u9fa5]{2,10}平台")),
     ("疑似地名残留", re.compile(r"[\u4e00-\u9fa5]{2,6}(?:省|市|县|镇|乡|街道)|[\u4e00-\u9fa5]{2,6}(?:路|街|大道)\s*\d")),
     ("疑似英文缩写实体", re.compile(r"(?<![A-Za-z])(?:[A-Z]{3,8})(?![A-Za-z])")),
     ("疑似长数字编号", re.compile(r"(?<!\d)\d{6,}(?!\d)")),
@@ -516,6 +590,13 @@ HIGH_RISK = [
     ("疑似人名（误报较多，需人工确认）",
      re.compile(r"(?<=[，。；、\s（(])([" + SURNAME[:120] + r"])[\u4e00-\u9fa5]{1,2}(?=[，。；、\s）)，。])")),
 ]
+
+# 这几类漏一条就够出事，报告里要置顶，退出码也按它们算
+HIGH_PREFIXES = ("疑似机构名", "疑似地名", "疑似平台类单位名")
+
+
+def is_high(kind):
+    return kind.startswith(HIGH_PREFIXES)
 
 
 def mask(frag):
@@ -537,6 +618,11 @@ def risk_scan(orig, desens):
         for idx, line in enumerate(lines, 1):
             for m in rx.finditer(line):
                 frag = m.group(0)
+                if name.startswith("疑似平台类"):
+                    # 规则会把前面的虚词一起咬进来（"在" + 地名 + "省"），
+                    # 裁掉之后遮蔽片段才定得住位
+                    while len(frag) > 4 and frag[0] in ADMIN_TRIM:
+                        frag = frag[1:]
                 if PLACEHOLDER_RE.search(frag):
                     continue
                 if RE_STD.match(frag) or KEEP.match(frag):
@@ -871,9 +957,13 @@ def run_scrub(args):
         print("  [完成] %s  ->  %s   替换 %d 处" % (base, os.path.basename(dest), n))
 
     # 映射表
+    map_pwd = getattr(args, "map_password", None)
     mapfile = os.path.join(outdir, "映射表_%s.json" % stamp)
     with open(mapfile, "w", encoding="utf-8") as fh:
-        json.dump(mapper.dump(), fh, ensure_ascii=False, indent=2)
+        json.dump(mapper.dump(map_pwd), fh, ensure_ascii=False, indent=2)
+    if not map_pwd:
+        print("\n[警告] 映射表未加密，里面是全部原文。别和脱敏件放在一起外发。"
+              "下次加 --map-password 就能加密。")
 
     # 报告（不含原文）
     report = os.path.join(outdir, "脱敏报告_%s.md" % stamp)
@@ -887,8 +977,10 @@ def run_scrub(args):
         for cat, cnt in sorted(mapper.stat.items(), key=lambda x: -x[1]):
             fh.write("| %s | %d |\n" % (cat, cnt))
         fh.write("\n## 三、占位符对照（仅占位符与类别，不含原文）\n\n")
-        fh.write("占位符与原文的对应关系见 `%s`，该文件含原文，**严禁外发**。\n\n"
-                 % os.path.basename(mapfile))
+        fh.write("占位符与原文的对应关系见 `%s`，该文件含原文，**严禁外发**。%s\n\n"
+                 % (os.path.basename(mapfile),
+                    "已用口令加密，还原时要输同一个口令；口令丢了就没法还原。"
+                    if map_pwd else "**本次未加密**——拿到这个文件就等于拿到原文。"))
         fh.write("## 四、残留风险（需人工复核）\n\n")
         if stats["risks"]:
             fh.write("| 文件 | 风险类型 | 行号 | 遮蔽片段 |\n|---|---|---|---|\n")
@@ -931,17 +1023,20 @@ def run_scrub(args):
     print("报告  ：%s" % report)
     print("输出目录：%s" % outdir)
 
-    high = [r for r in stats["risks"]
-            if r[1].startswith("疑似机构名") or r[1].startswith("疑似地名")]
+    high = [r for r in stats["risks"] if is_high(r[1])]
     if high:
-        print("\n[注意] 存在 %d 条高置信残留（机构名/地名），建议人工过一遍报告第四节。" % len(high))
+        print("\n[注意] 存在 %d 条高置信残留（机构名/地名/平台类单位名），"
+              "建议人工过一遍报告第四节。" % len(high))
         return 2
     return 0
 
 
 def run_restore(args):
-    with open(args.restore, "r", encoding="utf-8") as fh:
-        data = json.load(fh)
+    try:
+        data = load_map(args.restore, getattr(args, "map_password", None))
+    except ValueError as e:
+        print("[无法还原] %s" % e)
+        return 1
     pairs = sorted(((p["placeholder"], p["original"]) for p in data["pairs"]),
                    key=lambda x: -len(x[0]))
     files = gather_files(args.target)
@@ -967,6 +1062,7 @@ def main():
     ap.add_argument("--dict", help="自定义敏感词表（每行一个词，# 开头为注释）")
     ap.add_argument("--aggressive", action="store_true", help="激进模式：对疑似人名也做替换（误杀率上升）")
     ap.add_argument("--restore", help="传入映射表 json，执行还原")
+    ap.add_argument("--map-password", help="映射表口令：脱敏时给了就加密，还原时要用同一个口令")
     ap.add_argument("--images", choices=["keep", "strip"], default="keep",
                     help="docx 里的图片怎么处理：keep 原样保留（报告里列清单提醒人工看），"
                          "strip 整块删除（图里的 IP/系统名脱不到，删了最稳）")

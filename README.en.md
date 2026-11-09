@@ -22,9 +22,13 @@ It writes three things:
 
 - `<name>_脱敏.docx` — the version you can send out
 - `映射表_<timestamp>.json` — **contains the originals, can reverse everything,
-  never send this anywhere**
+  never send this anywhere**. Encrypted with a passphrase by default (PBKDF2 +
+  HMAC-SHA256, standard library only), so a mis-sent copy is not readable
 - `脱敏报告_<timestamp>.md` — what was replaced and what may still be left;
   contains no originals
+
+To reverse it, you need the desensitized file, the mapping table **and the
+passphrase you set** (local use only).
 
 Two modes: normal (default, only high-confidence matches) and aggressive
 (`--aggressive`, also replaces suspected person names, more false positives).
@@ -40,10 +44,12 @@ This section matters more than the one above.
   stamps that only exist as pixels are not touched. For docx you can delete the
   images outright (`--images strip`, safest) or keep them — the report then
   lists them so a human can look.
-- **Names ending in 「平台」 (platform) are not recognised.** Organisation names
-  are matched from a suffix list (company, group, hospital, university, bank,
-  research institute …) and that list has no entry for platform. Names like
-  「××数据共享平台」 stay as they are; add them to a custom word list.
+- **Names ending in 「平台」 (platform) are not replaced automatically.**
+  Organisation names are matched from a suffix list (company, group, hospital,
+  university, bank, research institute …) with no entry for platform. Rather
+  than guess — which would wreck generic phrases like 「云平台」 — any such name
+  carrying a province/city/district prefix is listed under residual risks in the
+  report. Add the full name to a custom word list and re-run.
 - **No semantic understanding.** It matches patterns. Generic references like
   「某部门」 are left alone, and a technical term that looks like a person name
   can be caught by mistake (more so in aggressive mode).
@@ -83,7 +89,8 @@ python desensitize.py 客户端资料/ -o out/desens
 python desensitize.py 资料.docx --dict 自定义词表.txt
 python desensitize.py 资料.docx --aggressive
 python desensitize.py 资料.docx --images strip
-python desensitize.py 脱敏版.docx --restore out/desens/映射表_xxx.json
+python desensitize.py 资料.docx --map-password 口令
+python desensitize.py 脱敏版.docx --restore out/desens/映射表_xxx.json --map-password 口令
 ```
 
 Exit codes: `0` fine; `2` high-risk residue found, needs a human look.
