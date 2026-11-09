@@ -45,9 +45,11 @@ if hasattr(sys.stdout, "reconfigure"):
 
 # ---------------------------------------------------------------- 基础工具
 
-PLACEHOLDER_RE = re.compile(
-    r"\[(单位|机关|人员|系统|未分类|邮编|IP|域名|型号|电话|邮箱|证件号|编号|路径|账号"
-    r"|组织|自定义|厂商|产品|日期|地址)\d*\]")
+# 占位符类别清单只在这里维护一份，三处正则（识别/还原/回检）都用它拼。
+PH_CATS = ("单位|机关|人员|系统|未分类|邮编|IP|域名|型号|电话|邮箱|证件号|编号|路径|账号"
+           "|组织|自定义|厂商|产品|日期|地址|机房")
+
+PLACEHOLDER_RE = re.compile(r"\[(" + PH_CATS + r")\d*\]")
 
 
 class Mapper:
@@ -58,8 +60,20 @@ class Mapper:
         self.backward = {}  # 占位符 -> 原文
         self.counter = {}
         self.stat = {}
+        self.alias = {}     # (类别, 原文) -> (类别, 规范名)：同一实体的另一种写法
+        self.force = {}     # 原文 -> 类别：表格「物理位置」列整格按地址脱，不按机房
+
+    def link(self, cat, raw, canon):
+        """把 raw 并入 canon 的编号：表格「物理环境名称」和「物理位置」是同一个机房。"""
+        canon = self.alias.get((cat, canon), (cat, canon))[1]
+        if raw == canon or (cat, raw) in self.forward:
+            return False
+        self.alias[(cat, raw)] = (cat, canon)
+        return True
 
     def get(self, cat, raw):
+        cat = self.force.get(raw.strip(), cat)
+        cat, raw = self.alias.get((cat, raw), (cat, raw))
         key = (cat, raw)
         if key in self.forward:
             return self.forward[key]
@@ -72,12 +86,18 @@ class Mapper:
 
     def dump(self, password=None):
         """password 非空则加密。映射表=原文全集，明文落盘的代价是全盘皆输。"""
+        # 别名不单独占编号：pairs 只留规范名，别名记在 aliases 里备查。
+        pairs = [{"category": c, "placeholder": p, "original": o}
+                 for (c, o), p in self.forward.items()]
+        aliases = [{"placeholder": self.forward[k], "original": raw}
+                   for (c, raw), k in self.alias.items() if k in self.forward]
         body = {
             "created": datetime.datetime.now().isoformat(timespec="seconds"),
             "note": "此文件包含原文，仅限本地保存，严禁外发。",
-            "pairs": [{"category": c, "placeholder": p, "original": o}
-                      for (c, o), p in self.forward.items()],
+            "pairs": pairs,
         }
+        if aliases:
+            body["aliases"] = aliases
         return encrypt_map(body, password) if password else body
 
 
@@ -148,10 +168,7 @@ def load_map(path, password=None):
 RE_BRACKET_TOKEN = re.compile(r"[\[［]\s*([^\[\]［］\n]{1,40}?)\s*[\]］]")
 # 长得像本工具占位符（类别 + 可选编号）的，才值得报「不认识」；
 # 普通方括号内容（[注]、[1]）不该进 unknown 列表。
-RE_PH_LIKE = re.compile(
-    r"(?:单位|机关|人员|系统|未分类|邮编|IP|域名|型号|电话|邮箱|证件号|编号|路径|账号"
-    r"|组织|自定义|厂商|产品|日期|地址)\d*",
-    re.I)
+RE_PH_LIKE = re.compile(r"(?:" + PH_CATS + r")\d*", re.I)
 
 
 def _norm_ph(s):
@@ -244,7 +261,9 @@ RE_POSTCODE_CTX = re.compile(r"(?:邮政编码|邮编|地址)[\s:：]{0,6}([0-8]
 
 def _classify_entity(name):
     """实体名 → 占位符类别。不再有"自定义"这个兜底。"""
-    if re.search(r"(?:系统|平台|云)$", name):
+    if re.search(r"(?:机房|数据中心|灾备中心)$", name):
+        return "机房"
+    if re.search(r"(?:系统|平台|云|项目|工程)$", name):
         return "系统"
     if re.search(r"(?:公司|集团|银行|医院|学校|学院|大学|研究院|研究所|设计院|事务所|"
                  r"中心|管理局|管理委员会|委员会|办公室|分行|支行|信用社|农商行|"
@@ -253,6 +272,19 @@ def _classify_entity(name):
     if re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9\-—_/\.]{2,}", name):
         return "型号"
     return "未分类"
+
+
+def _mostly_heading(term, text):
+    """这个长串是不是主要在当"整行标题"用（目录项 / 章节名）。"""
+    total = head = 0
+    for ln in text.splitlines():
+        if term not in ln:
+            continue
+        total += ln.count(term)
+        body = RE_TOC_LEADER.sub("", RE_HEADING_NUM.sub("", ln).strip()).strip()
+        if body == term:
+            head += 1
+    return total > 0 and head * 2 >= total
 
 
 class DocContext:
@@ -308,6 +340,10 @@ class DocContext:
         for t in sorted(freq, key=len, reverse=True):
             if any(t != k and t in k for k in kept):
                 continue
+            # 整篇反复出现、但每次都是"整行标题"的长串，是章节名不是实体。
+            # 目录里同一标题出现两三次，旧版会把它当长实体整体换成 [未分类N]。
+            if _mostly_heading(t, text):
+                continue
             kept.append(t)
         self.lexicon = [(t, _classify_entity(t)) for t in kept]
 
@@ -358,8 +394,16 @@ ORG_CONNECT = ("委托", "依据", "经过", "按照", "根据", "负责", "确�
                "组织", "要求", "规定", "明确", "提出")
 # 回溯时遇到这些词就停：它们左边一定不是机构名的一部分。
 ORG_HARD_STOP = ("政务外网", "大厦", "大楼", "广场", "机房", "楼宇", "园区")
-# 名字开头可以裁掉的虚字
-ORG_TRIM_HEAD = set("的了在由向对与和及或为是该本各全单同按共约近达超占两三其此这那")
+# 名字开头可以裁掉的虚字。年月日号第 是必须的：回溯会从"局"一路吃到
+# "2017年4月国家密码管理局"的"月"，替换后就变成"2017年4[单位1]颁发"。
+ORG_TRIM_HEAD = set("的了在由向对与和及或为是该本各全单同按共约近达超占两三其此这那"
+                    "年月日号第")
+# 单字介词：回溯会把紧贴实体左侧的介词一起吞进来（"经山东省大数据局批准"）。
+# 只有去掉介词后仍是"省/市/区/县 + 机构"的形态才右移一位；
+# "经济开发区"这类真名以"经济/经营"开头，不在其列。
+PREP_ONE = set("经由据向对在为被将把")
+PREP_FALSE = ("经济", "经营", "经验", "经管")
+RE_ADMIN_HEAD = re.compile(r"[\u4e00-\u9fa5]{2,3}(?:省|自治区|市|区|县)")
 # 以这些词开头的机构名一定是通用说法（"项目全局""项目管理委员会"）
 ORG_BAD_START = ("项目", "工作", "相关", "本次", "全部", "所有", "部分", "各类",
                  "其他", "目标", "当前", "通用", "统一", "上述", "以下")
@@ -481,11 +525,17 @@ NAME_BAD_SUB = ("符合", "要求", "通过", "重要", "指标", "口令", "系
 RE_PLACEHOLDERISH = re.compile(r"(?:[×xX某]{1,4}|\*{1,4})(?:省|市|区|县|镇|路|街|大道|医院|公司|局|院)")
 
 # 标准/规范号白名单前缀（绝不能脱敏）
-STD_PREFIX = r"(?:GB|GB/T|GM|GM/T|GA|GA/T|WS|WS/T|YY|YY/T|YD|YD/T|SJ|SJ/T|JR|JR/T|ISO|ISO/IEC|IEC|IEEE|RFC|ANSI|NIST|EN|ITU)"
+STD_PREFIX = (r"(?:ISO/IEC|ISO|IEC|IEEE|RFC|ANSI|NIST|ITU|"
+              r"GB|GM|GA|CM|WS|YY|YD|SJ|JR)")
 
+# 真实文档里标准号的分隔符经常是全角（GB／T 37092、GM／T 0016），
+# 空格也常是　。旧写法只认半角 / 和空格，于是整条标准号漏过保护，
+# 里面的 "T 37092" 被型号规则吃掉，输出成 "GB／[型号1]"。
 # 末尾必须是"非字母非数字"：只挡字母时，"GM2024CERT0001234" 里的 "GM202"
 # 仍会被认成标准号，并把它整串证书编号从命中列表里挤掉。
-RE_STD = re.compile(STD_PREFIX + r"\s?\d[\d.\-—:/]*(?![A-Za-z0-9])", re.I)
+RE_STD = re.compile(
+    STD_PREFIX + r"[ \u3000]*[／/_]?[ \u3000]*[Tt]?[ \u3000]*[0-9０-９]"
+    r"[0-9０-９.\-—–:：／/_]*(?![A-Za-z0-9])", re.I)
 RE_IDCARD = re.compile(r"(?<![0-9])[1-9]\d{5}(?:19|20)\d{2}(?:0[1-9]|1[0-2])(?:0[1-9]|[12]\d|3[01])\d{3}[\dXx](?![0-9])")
 RE_MOBILE = re.compile(r"(?<![0-9])1[3-9]\d{9}(?![0-9])")
 RE_TEL = re.compile(r"(?<![0-9])0\d{2,3}[- ]?\d{7,8}(?:[-转]\d{1,5})?(?![0-9])")
@@ -569,6 +619,27 @@ RE_BRAND = re.compile("|".join(re.escape(b) for b in BRANDS), re.I)
 RE_MODEL = re.compile(r"(?<![A-Za-z0-9])(?:[A-Za-z]{1,6}[- ]?\d{2,5}[A-Za-z0-9\-]{0,12})(?![A-Za-z0-9])")
 RE_MODEL_EXCLUDE = re.compile(r"^(?:SM[2349]|GM|GB|IPV[46]|SHA|AES|RSA|ECC|TLCP|TLS|SSL|IPSec|HMAC|CBC|CTR|GCM|PKCS|VLAN|MTU|QOS|RAID|SSD|HDD|NTP|SNMP|SSH|HTTP|HTTPS|FTP|SMTP|DNS|DHCP|LDAP|API|CPU|GPU|RAM|USB|KVM|RAID[0-9]|IPV4|OSPF|BGP|MPLS|VPN|WAF|IDS|IPS|HIS|PACS|LIS|EMR|CA|KMS|HSM|TCM|TPM)", re.I)
 
+# 长型号：真实产品名比 RE_MODEL 假设的长得多。
+#   OceanStor Pacific 9520（产品线 + 系列 + 编号，中间有空格）
+#   AntiDDoS1905-N / AntiDDoS1908（字母串 8 位，超过旧规则的 6 位上限）
+#   ViGapV6.5-3500HWG（带小数点版本号）
+#   DAS-RAS-100（多段连字符）
+# 四条都要求"字母 + 数字混排"，纯英文缩写不会被咬进来。
+RE_MODEL_LONG = re.compile(
+    r"(?<![A-Za-z0-9])("
+    r"[A-Z][a-z]+[A-Z][A-Za-z0-9]{1,12}(?:[ ][A-Z][A-Za-z]{1,12}){0,2}[ ]\d{3,5}(?:[-–][A-Za-z0-9]{1,8})?"
+    r"|[A-Za-z][A-Za-z]{1,11}\d{2,5}(?:[-–][A-Za-z0-9]{1,10})*"
+    r"|[A-Za-z]{2,12}\d+\.\d+(?:[-–][A-Za-z0-9]{1,10})*"
+    r"|[A-Za-z]{2,12}(?:[-_][A-Za-z0-9]{1,12}){2,}"
+    r")(?![A-Za-z0-9])")
+# 型号开头的技术缩写：这些不是产品型号，是协议/算法/版本
+MODEL_TECH_HEAD = frozenset((
+    "TLS", "SSL", "SM", "SHA", "AES", "RSA", "ECC", "TLCP", "IPV", "HTTP", "HTTPS",
+    "SSH", "HMAC", "PKCS", "RAID", "GB", "GM", "CM", "ISO", "IEC", "USB", "API",
+    "CPU", "GPU", "V", "DDR", "PCI", "PCIE", "SATA", "NVME", "IDE", "SCSI"))
+# "OB数据库"这类：产品代号 + 数据库，整体按产品记
+RE_DB_PRODUCT = re.compile(r"(?<![A-Za-z0-9])[A-Za-z][A-Za-z0-9]{1,5}数据库")
+
 # 保留不改的常见技术串
 KEEP = re.compile(r"^(?:SM[2349]|HIS|PACS|LIS|EMR|CA|KMS|HSM|TLS|SSL|IPSec|TLCP|VPN|WAF|API|CPU|USB|AES|RSA|SHA|MD5|CBC|CTR|GCM|RAM|SSD|HDD|IOPS|GB|TB|MB|KB|Mbps|Gbps|NFS|CIFS|SMB|FTP|SFTP|SNMP|NTP|SYSLOG|BIG-IP|RAID|VLAN|NAC|OCSP|CRL|TSA|RA|DICOM|HL7|OFD|PDF)$", re.I)
 
@@ -594,7 +665,12 @@ WHITELIST_BOUND = set(
 
 # ---------------------------------------------------------------- 厂商与产品
 # 已知厂商 / 产品单独分类：它们是"谁家的东西"，不是客户自己的单位名。
-VENDORS = ("深信服", "浪潮", "华为", "新华三", "天融信", "奇安信", "启明星辰", "绿盟", "安恒")
+# 用户口径：公开厂商也脱。密评材料里出现具体厂商名可反推项目，
+# 而且方案里已经有 [厂商N] 这一类，不脱就与它不一致。
+VENDORS = ("深信服", "浪潮", "华为", "新华三", "华三", "天融信", "奇安信", "启明星辰",
+           "绿盟", "安恒", "四川虹信", "虹信", "三未信安", "光电安辰", "伟思",
+           "吉大正元", "卫士通", "中电科", "格尔软件", "数字认证", "江南天安",
+           "三零卫士", "得安信息", "海泰方圆", "信安世纪", "江南信安")
 PRODUCTS = ("统信 UOS", "PolarDB", "OceanBase", "GaussDB", "TiDB", "达梦", "麒麟", "渔翁")
 
 RE_VENDOR = re.compile(
@@ -670,6 +746,11 @@ def find_orgs(text):
         limit = max(0, s - 40)
         while s > limit:
             ch = text[s - 1]
+            # 括号里的地名是公司名的一部分（"高维密码测评技术(山东)有限公司"）。
+            # ORG_STOP 里有括号，这里必须先放行，否则整串只剩"有限公司"四个字。
+            if ch in "()（）":
+                s -= 1
+                continue
             # 数字/符号/序号圈码一律停（"②政务外网医保局"）
             if not ("\u4e00" <= ch <= "\u9fa5" or "A" <= ch <= "Z" or "a" <= ch <= "z"):
                 break
@@ -680,8 +761,14 @@ def find_orgs(text):
             if two in ORG_CONNECT or two in ORG_HARD_STOP or four in ORG_HARD_STOP:
                 break
             s -= 1
-        while s < end - 3 and text[s] in ORG_TRIM_HEAD:
+        while s < end - 3 and (text[s] in ORG_TRIM_HEAD or text[s] in "()（）"):
             s += 1
+        # "经山东省大数据局"：回溯不停在单字介词上，起点右移一位把介词留给正文。
+        # 只认"介词 + 行政区划/国家机构"的形态——"为民服务中心"这种真名不动。
+        if s < end - 3 and text[s] in PREP_ONE and text[s:s + 2] not in PREP_FALSE:
+            rest = text[s + 1:end]
+            if RE_ADMIN_HEAD.match(rest) or rest.startswith(("国家", "中国")):
+                s += 1
         name = text[s:end].strip()
         if _ok_org(name):
             out.append((s, end, "单位", name))
@@ -929,6 +1016,8 @@ def find_vendors_products(text):
         out.append((m.start(), m.end(), "厂商", m.group(0)))
     for m in RE_PRODUCT.finditer(text):
         out.append((m.start(), m.end(), "产品", m.group(0)))
+    for m in RE_DB_PRODUCT.finditer(text):
+        out.append((m.start(), m.end(), "产品", m.group(0)))
     return out
 
 
@@ -995,7 +1084,7 @@ def filter_whitelist(text, hits):
     return out
 
 
-ENTITY_CATS = {"人员", "单位", "系统", "未分类", "地址", "型号", "厂商", "产品"}
+ENTITY_CATS = {"人员", "单位", "系统", "未分类", "地址", "型号", "厂商", "产品", "机房"}
 
 
 def _standalone(text, s, e):
@@ -1055,14 +1144,18 @@ def find_brand_models(text):
 
 def find_models(text):
     out = []
-    for m in RE_MODEL.finditer(text):
-        tok = m.group(0)
-        if RE_MODEL_EXCLUDE.match(tok) or KEEP.match(tok):
-            continue
-        if re.match(r"^[A-Za-z]{0,3}\d{1,3}$", tok):  # 纯数字或极短，跳过
-            continue
-        if re.search(r"[A-Za-z]", tok) and re.search(r"\d", tok) and len(tok) >= 4:
-            out.append((m.start(), m.end(), "型号", tok))
+    for rx in (RE_MODEL, RE_MODEL_LONG):
+        for m in rx.finditer(text):
+            tok = m.group(0)
+            if RE_MODEL_EXCLUDE.match(tok) or KEEP.match(tok):
+                continue
+            if re.match(r"^[A-Za-z]{0,3}\d{1,3}$", tok):  # 纯数字或极短，跳过
+                continue
+            head = re.match(r"[A-Za-z]+", tok)
+            if head and head.group(0).upper() in MODEL_TECH_HEAD:
+                continue
+            if re.search(r"[A-Za-z]", tok) and re.search(r"\d", tok) and len(tok) >= 4:
+                out.append((m.start(), m.end(), "型号", tok))
     return out
 
 
@@ -1106,6 +1199,11 @@ RE_CLOUD = re.compile(
     r"(?:[（(][^）)\n]{0,12}[）)])?")
 
 
+# 云平台名前面常黏着动词的残字（"系统部署在山东省政务云" → "署在山东省政务云"）。
+# 这些字一定不属于地名，逐字裁掉。
+CLOUD_TRIM_HEAD = set("在由于到向和与及为是的了署部统将把被对从经据按依")
+
+
 def find_clouds(text):
     """云平台名。前面常黏着"部署在/通过/调用"这类动词，按省/市后缀把左边裁掉。"""
     out = []
@@ -1116,12 +1214,192 @@ def find_clouds(text):
             if i >= 0:
                 cut = max(0, i - 2)
                 break
+        # 起点必须落在"地名首字"上：裁掉动词残字，否则会吞掉"部署在"的"署在"
+        while cut < len(g) - 4 and g[cut] in CLOUD_TRIM_HEAD:
+            cut += 1
         name = g[cut:]
         head = name.split("政务云")[0].split("云平台")[0].split("专有云")[0]
         # "网络区域包括云平台" 这类句子形状的，前面一定有连接词
         if any(w in head for w in ORG_CONNECT):
             continue
         out.append((s + cut, m.end(), "系统", name))
+    return out
+
+
+# ---------------------------------------------------------------- 项目名 / 机房
+# 项目名/系统名/平台名：政务方案里出现最多、也最需要脱的一类。
+# 两条路：① "项目名称："这类标签后面整段取值，精确；② 地名开头 + 强后缀。
+RE_PROJECT_LABEL = re.compile(
+    r"(?:项目名称|系统名称|平台名称|工程名称|项目名|系统名|平台名)\s*[:：]\s*"
+    r"([^\s，。；：、！？\n]{4,60})")
+RE_PROJECT_GEN = re.compile(
+    r"(?<![\u4e00-\u9fa5A-Za-z0-9])"
+    r"[\u4e00-\u9fa5]{2,4}(?:省|市|区|县|州|盟)"
+    r"[\u4e00-\u9fa5“”\"'‘’A-Za-z0-9\-]{2,30}?"
+    r"(?:一体化平台|一体化系统|云平台|网站|项目|工程)")
+PROJ_TAIL = ("一体化平台", "一体化系统", "云平台", "平台", "系统", "项目", "工程",
+             "网站", "云")
+PROJ_BAD_HEAD = ("本项目", "该项目", "本系统", "该系统", "本工程", "该工程", "此项",
+                 "上述", "以下", "相关", "全部", "所有", "本次")
+
+
+def _ok_project(name, labeled=False):
+    name = name.strip().strip("“”\"'‘’《》 ")
+    if not (4 <= len(name) <= 60):
+        return False
+    if name.startswith(PROJ_BAD_HEAD):
+        return False
+    tail = next((t for t in PROJ_TAIL if name.endswith(t)), None)
+    if not tail:
+        return False
+    core = name[:-len(tail)]
+    if len(core) < (2 if labeled else 3):
+        return False
+    if core in ORG_GENERIC_HEAD or core in ORG_BLACK:
+        return False
+    # 名字里必须有一个像样的专名：地名开头、带引号，或（标签取值时）够长。
+    # 不靠"够长"兜底，否则"本单位门户网站"这类通用说法也会被当成名字。
+    if not (PLACE_PREFIX.match(name) or "“" in name or '"' in name
+            or (labeled and len(core) >= 4)):
+        return False
+    return True
+
+
+def find_projects(text):
+    out = []
+    for m in RE_PROJECT_LABEL.finditer(text):
+        val = m.group(1).strip()
+        if _ok_project(val, labeled=True):
+            s = m.start(1) + m.group(1).find(val)
+            out.append((s, s + len(val), "系统", val))
+    for m in RE_PROJECT_GEN.finditer(text):
+        val = m.group(0)
+        if _ok_project(val):
+            out.append((m.start(), m.end(), "系统", val))
+    return out
+
+
+# 机房 / 数据中心 / 灾备中心：最能定位物理资产的一类信息。
+# 整段（含"中国移动(山东济南)"这类前缀和"B2-101""10层"这类位置）一起换。
+IDC_TAIL = re.compile(r"(?:数据中心|灾备中心|云计算中心|机房)")
+RE_IDC_TAIL_PART = re.compile(
+    r"\s*(?:[A-Za-z]?\d{1,3}[-－]\d{1,4}|[A-Za-z]\d{1,3}|\d{1,3}\s*层|\d{1,3}\s*楼)")
+IDC_GENERIC_HEAD = {
+    "本", "该", "中心", "生产", "备用", "灾备", "核心", "主机", "托管", "自建", "云",
+    "模块", "测试", "办公", "计算", "网络", "通信", "设备", "动力", "空调", "电池",
+    "配电", "监控", "信息", "数据", "屏蔽", "涉密", "非涉密", "新建", "原有", "现有",
+    "各", "全", "主", "备", "灾", "容灾", "业务", "系统", "服务", "基础", "统一"}
+# 句子里描述"机房怎么建"的词，出现在头部说明回溯咬进了句子，不是名字
+IDC_BAD_SUB = ("方案", "系统", "项目", "工程", "本次", "部署", "建设", "改造", "扩容",
+               "迁移", "采用", "使用", "通过", "利用", "依托", "新建", "规划", "设计",
+               "相关", "全部", "所有", "上述", "以下", "本期", "该")
+
+
+def _ok_idc(name):
+    if not (4 <= len(name) <= 40):
+        return False
+    head = IDC_TAIL.sub("", name).strip("()（） ")
+    if len(head) < 3:
+        return False
+    if head in IDC_GENERIC_HEAD or head.startswith(("本", "该", "上述", "以下", "相关")):
+        return False
+    if any(w in head for w in IDC_BAD_SUB):
+        return False
+    if not re.search(r"[\u4e00-\u9fa5]", head):
+        return False
+    return True
+
+
+def find_idcs(text):
+    out = []
+    for m in IDC_TAIL.finditer(text):
+        end, s = m.end(), m.start()
+        limit = max(0, s - 40)
+        while s > limit:
+            ch = text[s - 1]
+            # 括号、连字符、数字都是机房名的一部分（"(山东济南)"、"B2-101"）
+            if ch in "()（）-－_.·" or ch.isdigit():
+                s -= 1
+                continue
+            if not ("\u4e00" <= ch <= "\u9fa5" or "A" <= ch <= "Z" or "a" <= ch <= "z"):
+                break
+            if ch in ORG_STOP:
+                break
+            if text[s - 2:s] in ORG_CONNECT:
+                break
+            s -= 1
+        while s < end - 2 and (text[s] in ORG_TRIM_HEAD or text[s] in "()（）"):
+            s += 1
+        e2 = end
+        mm = RE_IDC_TAIL_PART.match(text, e2)
+        if mm:
+            e2 = mm.end()
+        name = text[s:e2].strip()
+        if _ok_idc(name):
+            out.append((s, e2, "机房", name))
+    return out
+
+
+# 纯文本表格：一行内用两个以上空格/制表符分格。
+CELL_SEP = re.compile(r"[ \t\u3000]{2,}")
+
+# 「物理环境名称 | 物理位置」表里两格是两个不同的东西：一个机房名，一个它的位置。
+# v5 让两格共用一个 [机房N]，脱敏后看着没问题，还原时位置整段被换成机房名——丢字段。
+# 现在位置列按地址脱（[地址N]），名称列仍是 [机房N]，还原逐字回得来。
+POSITION_HEADERS = ("物理位置", "地址", "所在地", "位置")
+
+
+def _table_cells(line):
+    """按 2+ 空格分格，返回每格的 (相对起点, 相对终点)。"""
+    spans, pos = [], 0
+    for part in CELL_SEP.split(line):
+        i = line.find(part, pos)
+        if i < 0:
+            i = pos
+        spans.append((i, i + len(part)))
+        pos = i + len(part)
+    return spans
+
+
+def _mark_position_cells(text, mapper):
+    """表格「物理位置」列里的机房命中改记地址。返回改记数。
+
+    表头单元格都很短，靠这个把表头行和数据行分开；数据行不参与列判定。
+    """
+    n, cols = 0, None
+    for m in re.finditer(r"[^\n]+", text):
+        line = m.group(0)
+        if not CELL_SEP.search(line):
+            cols = None
+            continue
+        cells = [text[m.start() + a:m.start() + b].strip() for a, b in _table_cells(line)]
+        head = {i for i, c in enumerate(cells) if any(k in c for k in POSITION_HEADERS)}
+        if head and len(cells) >= 2 and all(len(c) <= 12 for c in cells):
+            cols = head
+            continue
+        if not cols:
+            continue
+        for i in cols:
+            if i >= len(cells):
+                continue
+            for _s, _e, cat, raw in find_idcs(cells[i]):
+                if cat == "机房":
+                    mapper.force[raw] = "地址"
+                    n += 1
+    return n
+
+
+# 固定电话：7-8 位本地号（不带区号）。只有紧跟"电话/传真"这类标签才换——
+# 裸的 8 位数字在方案里更可能是容量、编号或金额。
+RE_TEL_LOCAL = re.compile(
+    r"(?:电话|传真|座机|联系电话|办公电话|联系方式|热线|tel)\s*[:：]?\s*"
+    r"([0-9０-９]{7,8}(?:[-－转][0-9]{1,5})?)(?![0-9])", re.I)
+
+
+def find_local_tel(text):
+    out = []
+    for m in RE_TEL_LOCAL.finditer(text):
+        out.append((m.start(1), m.end(1), "电话", m.group(1)))
     return out
 
 
@@ -1140,13 +1418,24 @@ def find_plans(text):
             continue
         if RE_STD.search(inner):
             continue
-        out.append((m.start(1), m.end(1), "未分类", inner))
+        # 书名号里如果前半截就是项目名，只换项目名，让"…密码应用方案"留在原处，
+        # 这样与正文里的 [系统N] 共用同一编号；认不出项目名才整条按未分类走。
+        pre = re.match(r"^(.{4,60}?)(密码应用方案(?:v?\d+(?:\.\d+)*)?)$", inner)
+        if pre and _ok_project(pre.group(1).strip(), labeled=True):
+            s = m.start(1) + inner.find(pre.group(1).strip())
+            out.append((s, s + len(pre.group(1).strip()), "系统", pre.group(1).strip()))
+        else:
+            out.append((m.start(1), m.end(1), "未分类", inner))
     st = text.strip()
-    if (re.search(r"密码应用方案(?:v?\d+(?:\.\d+)*)?$", st)
-            and 6 <= len(st) <= 80 and "《" not in st
-            and not any(w in st for w in PLAN_BAD)):
-        s = text.find(st)
-        out.append((s, s + len(st), "未分类", st))
+    # 整段就是一个方案标题时，不能把标题当实体换掉：标题里的项目名按 [系统N] 换，
+    # "密码应用方案"是文档类型，留着读者才知道这是份什么材料。
+    # 旧版整条换成 [未分类1]，于是同一个项目在标题和正文各有一个编号。
+    mt = re.match(r"^(.{4,60}?)(密码应用方案(?:v?\d+(?:\.\d+)*)?)$", st)
+    if mt and "《" not in st and not any(w in st for w in PLAN_BAD):
+        prefix = mt.group(1).strip()
+        if _ok_project(prefix, labeled=True):
+            s = text.find(prefix)
+            out.append((s, s + len(prefix), "系统", prefix))
     # 系统名称单元格：整段就是一个以省市开头、以"系统/平台"结尾的名字
     if (st.endswith(("系统", "平台")) and 6 <= len(st) <= 60
             and PLACE_PREFIX.match(st) and not any(w in st for w in PLAN_BAD)):
@@ -1197,14 +1486,45 @@ def _doc_id_spans(text, strict=False):
 
 # ---------------------------------------------------------------- 主替换逻辑
 
+# 章节标题/目录行："1.2. 国家政策法规要求 …… 5"、"第三章 密码应用方案"。
+# 这些是文档结构，不是实体。只挡"整条标题就是一个实体"的情况——
+# 标题里嵌着的真实名字（"3.2 山东省政务云平台部署"）照旧要脱。
+RE_HEADING_NUM = re.compile(
+    r"^[ \t\u3000]*(?:\d+(?:\.\d+)*[.、．]?|[一二三四五六七八九十]+[、.．]"
+    r"|第[一二三四五六七八九十百]+[章节])\s*")
+RE_TOC_LEADER = re.compile(r"[.．·…\s]{2,}\d{1,4}\s*$")
+
+
+def _heading_title_spans(text):
+    """返回每个标题行的「标题正文」区间（去掉编号、点线和页码）。"""
+    spans = []
+    pos = 0
+    for line in text.splitlines(True):
+        m = RE_HEADING_NUM.match(line)
+        if m:
+            raw = line.rstrip("\r\n")
+            body = raw[m.end():]
+            bm = RE_TOC_LEADER.search(body)
+            if bm:
+                body = body[:bm.start()]
+            body = body.strip()
+            if body:
+                s = pos + m.end() + (len(raw[m.end():]) - len(raw[m.end():].lstrip()))
+                spans.append((s, s + len(body)))
+        pos += len(line)
+    return spans
+
+
 def collect(text, custom_words=(), aggressive=False, ctx=None, strict_docid=False):
     """返回命中列表 [(start, end, cat, raw)]，已按优先级处理重叠。"""
     hits = []
     hits += find_lexicon(text, ctx)
     hits += find_custom(text, custom_words)
     hits += find_plans(text)
+    hits += find_projects(text)
     hits += find_orgs(text)
     hits += find_clouds(text)
+    hits += find_idcs(text)
     hits += find_persons(text, loose=aggressive, ctx=ctx)
     hits += find_vendors_products(text)
     # 日期只看自身分句里有没有"出生/入职/签订"这类定位词
@@ -1212,6 +1532,7 @@ def collect(text, custom_words=(), aggressive=False, ctx=None, strict_docid=Fals
     hits += find_addresses(text)
     hits += find_ids(text)
     hits += find_postcodes(text, ctx)
+    hits += find_local_tel(text)
 
     for rx, cat in ((RE_IDCARD, "证件号"), (RE_MOBILE, "电话"), (RE_EMAIL, "邮箱"),
                     (RE_IPV6, "IP"), (RE_IPV4, "IP"), (RE_MAC, "IP"),
@@ -1260,12 +1581,22 @@ def collect(text, custom_words=(), aggressive=False, ctx=None, strict_docid=Fals
             kept.append(h)
         hits = kept
 
+    # 标题/目录保护：章节标题被当成"未分类实体"整条换掉，是目录变成
+    # "[未分类2] [未分类3]"的原因。这里只挡这一类——
+    # 标题里如果是真实单位/系统名（"3.2 山东省政务云平台部署"），照旧要脱。
+    for ts, te in _heading_title_spans(text):
+        if te - ts < 4:
+            continue
+        hits = [h for h in hits
+                if h[2] != "未分类"
+                or not (h[0] >= ts and h[1] <= te and (h[1] - h[0]) >= 0.9 * (te - ts))]
+
     # 去重叠：长优先，其次类别优先级。
     # taken 按 start 升序且互不重叠，插入点前后各查一次即可，O(n log n)。
     prio = {"未分类": 0, "自定义": 0, "证件号": 1, "日期": 2, "编号": 3, "电话": 4,
             "邮箱": 5, "域名": 6, "IP": 7, "账号": 8, "路径": 9, "邮编": 10,
-            "厂商": 11, "产品": 12, "地址": 13, "系统": 14, "单位": 15, "人员": 16,
-            "型号": 17}
+            "机房": 11, "厂商": 12, "产品": 13, "地址": 14, "系统": 15, "单位": 16,
+            "人员": 17, "型号": 18}
     hits.sort(key=lambda h: (-(h[1] - h[0]), prio.get(h[2], 99)))
     taken = []
     chosen = []
@@ -1278,7 +1609,22 @@ def collect(text, custom_words=(), aggressive=False, ctx=None, strict_docid=Fals
         taken.insert(i, (s, e))
         chosen.append((s, e, cat, raw))
     chosen.sort()
+    # 同一原文实体全文只允许一个占位符：类别也统一，
+    # 否则 (类别, 原文) 会各生成一个编号（"国家密码管理局"出现 [单位3] 和 [单位13]）。
+    best = {}
+    for s, e, cat, raw in chosen:
+        k = raw.strip()
+        if k not in best or RAW_CAT_PRIO.get(cat, 99) < RAW_CAT_PRIO.get(best[k], 99):
+            best[k] = cat
+    chosen = [(s, e, best[raw.strip()], raw) for s, e, cat, raw in chosen]
     return _merge_adjacent_hits(text, chosen)
+
+
+# 同一个原文在不同规则下可能落到不同类别，归一化时按这个顺序取一个
+RAW_CAT_PRIO = {"机房": 0, "厂商": 1, "产品": 2, "证件号": 3, "电话": 4, "邮箱": 5,
+                "域名": 6, "IP": 7, "账号": 8, "路径": 9, "邮编": 10, "编号": 11,
+                "日期": 12, "人员": 13, "单位": 14, "系统": 15, "型号": 16,
+                "地址": 17, "未分类": 18}
 
 
 MERGE_CATS = {"单位", "系统", "未分类", "地址"}
@@ -1306,6 +1652,8 @@ def scrub(text, mapper, custom_words=(), aggressive=False, ctx=None, strict_doci
                      ctx=ctx, strict_docid=strict_docid)
     if not chosen:
         return text, 0
+    # 先定好表格位置列的类别，再动手替换：位置列是 [地址N]，名称列才是 [机房N]。
+    _mark_position_cells(text, mapper)
     buf = []
     last = 0
     for s, e, cat, raw in chosen:
@@ -1409,23 +1757,38 @@ def risk_scan(orig, desens):
 # 不判断"通顺"——那需要语言模型。只做三条正则能做的事，命中就报，
 # 不阻断流程，交给人工看。宁可不报，也不猜。
 
-RE_PH_TOKEN = re.compile(
-    r"\[(?:单位|机关|人员|系统|未分类|邮编|IP|域名|型号|电话|邮箱|证件号|编号|路径|账号"
-    r"|组织|自定义|厂商|产品|日期|地址)\d+\]")
-CN_PUNCT_BEFORE = set("，。；：、！？")
+RE_PH_TOKEN = re.compile(r"\[(?:" + PH_CATS + r")\d+\]")
+
+# 占位符左边紧贴这些字，说明占位符落在句法位置上，不是被塞进词中间：
+# 介词/连词/助词，以及日期单位（"2020年9月[单位2]发布"）。
+PH_LEFT_FUNC = set("在由于向对与和及或是为的了到从将把被经据按依就也都还并且等各本该其此这那以用"
+                   "年月日时点期号届次第")
+# 占位符右边紧跟这些，说明后面是谓词/助词/量词，不是名字被切掉的残片。
+PH_RIGHT_FUNC = set("的了着过是在于和与及或等个台套次项条名位为将把被由对向")
+# 名字被切掉的后半截：占位符后面还挂着一长串机构后缀。
+ORG_TAIL_FRAG = ("有限", "股份", "集团", "控股", "公司", "事务所", "研究院", "设计院")
 
 
 def _is_cjk(ch):
     return "\u4e00" <= ch <= "\u9fff"
 
 
-def readability_scan(text):
-    """三条机械检查，返回 [(问题, 行号, 片段)]。
+def _cjk_run(text, i, step, limit=12):
+    """从 i 起（step=±1）连续汉字的个数，最多数 limit 个。"""
+    n = 0
+    while 0 <= i < len(text) and n < limit and _is_cjk(text[i]):
+        n += 1
+        i += step
+    return n
 
-    1. 占位符被拆在词中间：左右紧贴汉字（深[单位1]服、[厂商1]的服务器）
-    2. 占位符紧贴中文标点：，[单位1] 。[人员1]
-    3. 连续两个以上占位符无间隔：[单位1][人员1]
-    片段只取占位符 + 紧邻的 1 个字符，不把原文带进报告。
+
+def readability_scan(text):
+    """只报真拆开的两类形态，返回 [(问题, 行号, 片段)]。
+
+    1. 占位符夹在两个汉字中间，且紧贴的汉字合计不到 3 个（深[单位1]服、国[单位1]局）
+    2. 占位符后面还挂着一长串机构名残片（[单位1]科技股份有限 + 公司）
+    紧邻标点/空白/行首行尾/数字、以及"由[单位1]负责""[单位2]颁发"这类句法位置，
+    都是正常替换，不再报——上一版把它们全算成误伤，第七节噪音比信号多。
     """
     out = []
     toks = list(RE_PH_TOKEN.finditer(text))
@@ -1438,12 +1801,22 @@ def readability_scan(text):
         s, e = m.span()
         left = text[s - 1] if s > 0 else ""
         right = text[e] if e < len(text) else ""
-        if (left and _is_cjk(left)) or (right and _is_cjk(right)):
-            out.append(("占位符被拆在词中间", line_of(s),
-                        (left if _is_cjk(left) else "") + m.group(0)
-                        + (right if _is_cjk(right) else "")))
-        if left and left in CN_PUNCT_BEFORE:
-            out.append(("占位符紧贴中文标点", line_of(s), left + m.group(0)))
+        lc, rc = _is_cjk(left), _is_cjk(right)
+        # 1) 两边都是汉字、合计不到 3 字，且不是虚词/日期单位托着的
+        if lc and rc and left not in PH_LEFT_FUNC and right not in PH_RIGHT_FUNC:
+            if _cjk_run(text, s - 1, -1) + _cjk_run(text, e, 1) < 3:
+                out.append(("占位符被拆在词中间", line_of(s), left + m.group(0) + right))
+                continue
+        # 2) 占位符把机构名切成两半，后半截还留在正文里
+        if rc:
+            j = e
+            while j < len(text) and j - e < 12 and _is_cjk(text[j]):
+                j += 1
+            frag = text[e:j]
+            if len(frag) >= 4 and frag.endswith(ORG_TAIL_FRAG):
+                out.append(("占位符切断了机构名", line_of(s), m.group(0) + frag))
+                continue
+        # 3) 两个占位符完全贴在一起（中间连空格都没有）
         if i + 1 < len(toks) and toks[i + 1].start() == e:
             out.append(("连续占位符无间隔", line_of(s),
                         m.group(0) + toks[i + 1].group(0)))
@@ -1663,10 +2036,14 @@ def _sub_first_para(cell, new):
 
 
 RESULT_HEADERS = ("评估结果", "评估结论", "测评结果", "结论", "结果")
+# 表头是电话/传真时，整列都是电话号码。7-8 位本地号没有区号，段落里认不出，
+# 只能靠表头。单元格必须整格就是号码，避免把"设备 8 台"这类内容误换。
+PHONE_HEADERS = ("电话", "传真", "座机", "联系方式")
+RE_TEL_CELL = re.compile(r"^(?:0\d{2,3}[-－ ]?)?\d{7,8}(?:[-－转]\d{1,5})?$")
 
 
 def _scrub_table(tbl, mapper, cw, agg, ctx=None):
-    """表格里单独成格的人名没有上下文，靠表头列名推断。
+    """表格里单独成格的人名/电话没有上下文，靠表头列名推断。
 
     两种表都要认：
       1) 常规表：首行是表头，"负责人/姓名"等列整列都是人名；
@@ -1679,25 +2056,40 @@ def _scrub_table(tbl, mapper, cw, agg, ctx=None):
     header = [_para_text(c).strip() for c in RE_TC.findall(rows[0])]
     pcols = {i for i, h in enumerate(header) if any(k in h for k in PERSON_HEADERS)}
     rcols = {i for i, h in enumerate(header) if any(k in h for k in RESULT_HEADERS)}
+    tcols = {i for i, h in enumerate(header) if any(k in h for k in PHONE_HEADERS)}
+    xcols = {i for i, h in enumerate(header) if any(k in h for k in POSITION_HEADERS)}
     pcols -= rcols
+    tcols -= rcols
     total = [0]
 
     def on_row(m, _i):
         cells = RE_TC.findall(m.group(0))
         texts = [_para_text(c).strip() for c in cells]
+        # 位置列整格是地址，不是机房名：先定类别，后面逐段脱敏时才会出 [地址N]
+        for i in xcols:
+            if i < len(texts):
+                for _s, _e, cat, raw in find_idcs(texts[i]):
+                    if cat == "机房":
+                        mapper.force[raw] = "地址"
         pcell = set(pcols)
+        tcell = set(tcols)
         for i, t in enumerate(texts):
             if i + 1 < len(texts) and (t in PERSON_HEADERS or t.endswith("姓名")):
                 pcell.add(i + 1)
-        if not pcell:
+            if i + 1 < len(texts) and any(k in t for k in PHONE_HEADERS):
+                tcell.add(i + 1)
+        if not pcell and not tcell:
             return m.group(0)
         ci = [-1]
 
         def on_cell(mc, _j):
             ci[0] += 1
+            t = _para_text(mc.group(0)).strip()
+            if ci[0] in tcell and RE_TEL_CELL.fullmatch(t):
+                total[0] += 1
+                return _sub_first_para(mc.group(0), mapper.get("电话", t))
             if ci[0] not in pcell:
                 return mc.group(0)
-            t = _para_text(mc.group(0)).strip()
             if not SURNAME_ONLY.fullmatch(t) or not _is_name(t, ctx):
                 return mc.group(0)
             total[0] += 1
@@ -2069,7 +2461,7 @@ def run_scrub(args):
                 fh.write("| %s | %s | %d | `%s` |\n" % (f, kind, ln, frag))
             if len(stats["readability"]) > 80:
                 fh.write("\n（另有 %d 条未列出）\n" % (len(stats["readability"]) - 80))
-            fh.write("\n> 片段只含占位符和紧邻的 1 个字符，不含原文。\n")
+            fh.write("\n> 片段取自脱敏后的正文，只含占位符和紧邻的字，不含映射表里的原文。\n")
         else:
             fh.write("未发现占位符被拆进词里的迹象。\n")
 
