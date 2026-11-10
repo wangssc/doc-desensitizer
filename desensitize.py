@@ -914,6 +914,29 @@ def _dedupe_spans(spans):
 
 ADDR_GLUE = set("省市区县镇乡村路街巷大道号栋座层室楼院厦场园")
 
+# 地址前的标签词。链式行政区划/楼宇名规则在锚点（市/大厦）前允许吃 2–4（或 2–12）
+# 个汉字，于是"联系地址是济南市…"会从"址"起算，把"址是"这类标签尾巴带进地址。
+# 匹配段头部若落在这类标签里，裁到标签末尾，标签词原样保留。
+RE_ADDR_LABEL = re.compile(
+    r"(?:联系|办公|部署|机房|注册|生产|通讯|通信|邮寄|收货|发货|公司|单位|项目|"
+    r"设备|服务器|实际|详细|具体|使用|所在)?地址[ \u3000]*(?:是|为|在|位于|：|:)?"
+    r"|(?:所在地|位置|地点)[ \u3000]*(?:是|为|在|位于|：|:)?"
+    r"|(?:位于|地处|坐落于|座落于)")
+
+
+def _trim_addr_label(text, s, e):
+    """裁掉地址段头部误吞的"地址是/办公地址为"等标签，返回新的起点。
+
+    "联系地址是济南市历下区" 的链式匹配从"址"起算（"址是济南市历下区"），
+    标签词就被劈成两半。这里把起点推到标签末尾，保证"联系地址是"完整留在外面。
+    """
+    best = s
+    for m in RE_ADDR_LABEL.finditer(text, max(0, s - 8), e):
+        if m.end() > best:
+            best = m.end()
+    # 裁完至少还得剩 4 个字，否则宁可不动（"地址大厦"不能被裁成"大厦"）
+    return best if e - best >= 4 else s
+
 
 def _addr_glue(gap):
     """两段地址之间的间隙算不算"同一地址的残段"。
@@ -1005,6 +1028,7 @@ def find_addresses(text):
             continue
         if not blocked(s, m.end()):
             addr.append((s, m.end()))
+    addr = [(_trim_addr_label(text, s, e), e) for s, e in addr]
     for s, e in _merge_address_spans(text, _dedupe_spans(addr)):
         out.append((s, e, "地址", text[s:e]))
     return out

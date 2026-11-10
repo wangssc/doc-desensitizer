@@ -175,8 +175,15 @@ def do_scrub(payload):
         return err, 400
 
     files = payload.get("files") or []
+    # 纯文本是主路径：从 Word 全选复制粘进来，不再走 docx 往返。
+    # 把文本包成一条虚拟文件，后面整条管线（映射表、报告、复核、残留扫描）原样复用。
+    text_in = payload.get("text")
+    text_mode = isinstance(text_in, str) and bool(text_in.strip())
+    if text_mode:
+        files = [{"name": "粘贴文本.txt",
+                  "data": base64.b64encode(text_in.encode("utf-8")).decode("ascii")}]
     if not files:
-        return {"ok": False, "error": "没有收到文件"}, 400
+        return {"ok": False, "error": "没有收到文件或文本"}, 400
 
     words = [w.strip() for w in (payload.get("words") or "").splitlines() if w.strip()]
     aggressive = bool(payload.get("aggressive"))
@@ -330,12 +337,17 @@ def do_scrub(payload):
               "custom_props_removed": sum(m["custom_props_removed"] for m in metas),
               "docx_cleaned": len(metas)}
 
-    return {"ok": True, "dir": outdir, "batch": batch, "total": total, "files": results,
-            "stat": mapper.stat, "risks": risks[:200], "riskTotal": len(risks),
-            "readability": readability[:200], "readabilityTotal": len(readability),
-            "high": len(high), "mapfile": mapfile, "report": report,
-            "media": media_out, "encrypted": bool(map_pwd), "review": review,
-            "code": 2 if high else 0}, 200
+    out = {"ok": True, "dir": outdir, "batch": batch, "total": total, "files": results,
+           "stat": mapper.stat, "risks": risks[:200], "riskTotal": len(risks),
+           "readability": readability[:200], "readabilityTotal": len(readability),
+           "high": len(high), "mapfile": mapfile, "report": report,
+           "media": media_out, "encrypted": bool(map_pwd), "review": review,
+           "code": 2 if high else 0}
+    if text_mode:
+        first = next((r for r in results if isinstance(r.get("text"), str)), None)
+        out["text"] = first["text"] if first else ""
+        out["counts"] = dict(mapper.stat)
+    return out, 200
 
 
 def do_restore_text(payload):
@@ -352,33 +364,52 @@ def do_restore_text(payload):
     if err:
         return err, 400
 
-    path = resolve_map_path(payload.get("mapfile"), payload.get("mapbatch") or "")
-    if not path:
-        return {"ok": False, "error": "找不到映射表：%s"
-                % (payload.get("mapfile") or "（没选）")}, 400
-    try:
-        with open(path, "r", encoding="utf-8") as f:
-            data = json.load(f)
-    except Exception as e:
-        return {"ok": False, "error": "映射表读不出来：%s" % e}, 400
-
-    if D.is_encrypted(data):
+    # 映射表来源二选一：下拉/路径选输出目录里的，或页面手动选一个 .json 把内容传上来。
+    mapdata = payload.get("map")
+    if mapdata is not None:
         try:
-            data = D.decrypt_map(data, pwd)
-        except ValueError:
-            return {"ok": False, "error": "口令不对"}, 400
-        except Exception:
-            return {"ok": False, "error": "映射表损坏，解不开"}, 400
+            if isinstance(mapdata, str):
+                mapdata = json.loads(mapdata)
+        except Exception as e:
+            return {"ok": False, "error": "映射表读不出来：%s" % e}, 400
+        if not isinstance(mapdata, dict):
+            return {"ok": False, "error": "这不是映射表"}, 400
+        if D.is_encrypted(mapdata):
+            try:
+                mapdata = D.decrypt_map(mapdata, pwd)
+            except ValueError:
+                return {"ok": False, "error": "口令不对"}, 400
+            except Exception:
+                return {"ok": False, "error": "映射表损坏，解不开"}, 400
+        mapname = "手动选择的映射表"
+    else:
+        path = resolve_map_path(payload.get("mapfile"), payload.get("mapbatch") or "")
+        if not path:
+            return {"ok": False, "error": "找不到映射表：%s"
+                    % (payload.get("mapfile") or "（没选）")}, 400
+        try:
+            with open(path, "r", encoding="utf-8") as f:
+                mapdata = json.load(f)
+        except Exception as e:
+            return {"ok": False, "error": "映射表读不出来：%s" % e}, 400
+        if D.is_encrypted(mapdata):
+            try:
+                mapdata = D.decrypt_map(mapdata, pwd)
+            except ValueError:
+                return {"ok": False, "error": "口令不对"}, 400
+            except Exception:
+                return {"ok": False, "error": "映射表损坏，解不开"}, 400
+        mapname = os.path.basename(path)
 
     pairs = []
-    for p in (data.get("pairs") or []):
+    for p in (mapdata.get("pairs") or []):
         try:
             pairs.append((p["placeholder"], p["original"]))
         except (KeyError, TypeError):
             continue
     new, n, unk = D.restore_text(text, pairs)
     return {"ok": True, "text": new, "replaced": n, "unknown": unk,
-            "mapfile": os.path.basename(path)}, 200
+            "mapfile": mapname}, 200
 
 
 def do_restore(payload):

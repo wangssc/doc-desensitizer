@@ -77,7 +77,13 @@ header .tag{font-size:12px; color:#a8c6e6}
     border:1px solid var(--line); border-radius:7px; resize:vertical;
     font-family:"Consolas","Microsoft YaHei",monospace; background:#fcfdff;
   }
-  textarea:focus, input:focus{outline:2px solid #cfe3fb; border-color:var(--brand2)}
+  textarea:focus, input:focus, select:focus{outline:2px solid #cfe3fb; border-color:var(--brand2)}
+  /* 主路径的大文本框：至少 12 行，正文按阅读字体显示 */
+  textarea.bigtext{
+    min-height:300px; font-size:14px; line-height:1.75; background:#fff;
+    font-family:"Microsoft YaHei","PingFang SC",-apple-system,system-ui,sans-serif;
+  }
+  textarea.bigtext[readonly]{background:#f7fafd}
   .hint{font-size:12px; color:var(--sub); margin-top:6px}
   .hint.warn{color:var(--warn)}
   .hint.danger{color:var(--danger)}
@@ -85,6 +91,7 @@ header .tag{font-size:12px; color:#a8c6e6}
     flex:1; min-width:200px; padding:8px 10px; font-size:13px; font-family:inherit;
     border:1px solid var(--line); border-radius:7px; background:#fcfdff;
   }
+  select.pw{padding:8px 10px}
   .row{display:flex; align-items:center; gap:12px; flex-wrap:wrap}
   .btn{
     border:1px solid var(--line); background:#fff; color:var(--ink);
@@ -163,12 +170,33 @@ header .tag{font-size:12px; color:#a8c6e6}
   .leak .s{font-size:12px; color:#9c3b3b; margin:6px 0 0}
   .copyrow{display:flex; align-items:center; gap:14px; flex-wrap:wrap}
   .copyrow .btn{padding:9px 20px}
-  .promptprev{
-    margin:12px 0 0; padding:10px 12px; background:#f7fafd; border:1px dashed #d5e0ec;
-    border-radius:7px; font-size:12px; line-height:1.7; color:var(--sub);
-    white-space:pre-wrap; font-family:inherit;
-  }
   .rthead{font-size:12px; color:var(--sub); margin:-6px 0 10px}
+  /* ---------- 粘贴主路径布局 ---------- */
+  .pastewrap{display:flex; gap:18px; align-items:flex-start; flex-wrap:wrap}
+  .paste-main{flex:1 1 500px; min-width:280px}
+  .paste-side{
+    flex:0 0 236px; display:flex; flex-direction:column; gap:9px;
+    background:#f7fafd; border:1px solid var(--line); border-radius:9px; padding:14px;
+  }
+  .paste-side .btn.primary{width:100%; padding:11px 0}
+  .pastelead{font-size:13px; color:var(--sub); margin-bottom:8px}
+  details.opt{margin-top:12px}
+  details.opt summary, details.wordbox summary{
+    cursor:pointer; font-size:13px; color:var(--brand2); user-select:none;
+  }
+  details.opt[open] summary{margin-bottom:8px}
+  details.wordbox{
+    border:1px solid var(--line); border-radius:10px; background:#fff;
+    margin-top:18px; overflow:hidden;
+  }
+  details.wordbox summary{
+    padding:14px 18px; font-size:14px; color:var(--brand); font-weight:600;
+    background:#f7fafd;
+  }
+  details.wordbox[open] summary{border-bottom:1px solid var(--line)}
+  .wordbody{padding:18px}
+  .copybar{display:flex; align-items:center; gap:12px; flex-wrap:wrap; margin-bottom:10px}
+  .side-label{font-size:12px; color:var(--sub)}
 </style>
 </head>
 <body>
@@ -196,79 +224,81 @@ header .tag{font-size:12px; color:#a8c6e6}
   <!-- ============ 脱敏 ============ -->
   <section id="pane-scrub">
     <div class="card">
-      <h2><span class="n">1</span>选择资料</h2>
-      <div class="drop" id="drop">
-        <div class="big">把客户资料拖到这里，或点击选择</div>
-        <div class="small">支持 .docx / .txt / .md / .csv，可一次选多个</div>
-      </div>
-      <input type="file" id="picker" multiple accept=".docx,.txt,.md,.csv" class="hidden">
-      <div class="files" id="files"></div>
-      <div class="hint" id="dropHint"></div>
-      <div class="hint warn" id="sizeWarn"></div>
-    </div>
-
-    <div class="card">
-      <h2><span class="n">2</span>敏感词表<span style="font-weight:400;color:var(--sub);font-size:12px">（可选，一行一个）</span></h2>
-      <textarea id="words" placeholder="单位简称&#10;自建系统名&#10;特殊地名"></textarea>
-      <div class="hint warn">自动识别覆盖不到的词放这里。填了它，脱得最干净——尤其是裸地名和没有上下文的人名。</div>
-    </div>
-
-    <div class="card">
-      <h2><span class="n">3</span>开始</h2>
-      <div class="row" style="justify-content:space-between">
-        <div style="display:flex;flex-direction:column;gap:6px">
-          <label class="chk"><input type="checkbox" id="aggr"> 激进模式（连没有上下文的疑似人名也脱，误杀更多）</label>
-          <label class="chk"><input type="checkbox" id="stripimg"> 移除文档里的图片（Word 里的图脱不到，图上的 IP、系统名全留着）</label>
-          <label class="chk"><input type="checkbox" id="encmap" checked disabled> 映射表强制加密（不可关闭）</label>
+      <h2><span class="n">1</span>粘贴文本</h2>
+      <div class="pastewrap">
+        <div class="paste-main">
+          <div class="pastelead">把要脱敏的内容粘进来</div>
+          <textarea id="scrubIn" class="bigtext" rows="14"
+                    placeholder="从 Word 里全选复制（Ctrl+A、Ctrl+C），直接粘到这里。"></textarea>
+          <details class="opt">
+            <summary>可选：补充敏感词表（一行一个）</summary>
+            <textarea id="words" placeholder="单位简称&#10;自建系统名&#10;特殊地名"></textarea>
+            <div class="hint warn">自动识别覆盖不到的词放这里。填了它，脱得最干净——尤其是裸地名和没有上下文的人名。</div>
+          </details>
+        </div>
+        <div class="paste-side">
+          <label class="side-label" for="mappwd">映射表口令（必填，至少 6 位）</label>
           <input type="password" id="mappwd" class="pw" autocomplete="new-password"
-                 placeholder="映射表口令（至少 6 位，还原时要用同一个，丢了还原不回来）" style="max-width:420px">
+                 placeholder="还原时要用同一个">
           <div class="hint danger" id="pwdWhy">映射表里是原文对照，明文落到磁盘上等于没脱敏。
-            必须设口令（至少 6 位），没填不能开始；口令丢了就还原不回来。</div>
-        </div>
-        <div style="display:flex;flex-direction:column;align-items:flex-end;gap:4px">
+            必须设口令，没填不能开始；口令丢了就还原不回来。</div>
+          <label class="chk"><input type="checkbox" id="aggr"> 激进模式（误杀更多）</label>
           <button class="btn primary" id="go">开 始 脱 敏</button>
-          <span class="hint" id="goProg" style="font-size:12px;min-height:16px"></span>
+          <span class="hint" id="goProg" style="min-height:16px"></span>
         </div>
       </div>
     </div>
 
-    <div id="result" class="hidden"></div>
+    <div id="textResult" class="hidden"></div>
+
+    <details class="wordbox" id="wordEntry">
+      <summary>或者处理整份 Word 文件</summary>
+      <div class="wordbody">
+        <div class="drop" id="wordDrop">
+          <div class="big">把客户资料拖到这里，或点击选择</div>
+          <div class="small">支持 .docx / .txt / .md / .csv，可一次选多个</div>
+        </div>
+        <input type="file" id="wordPicker" multiple accept=".docx,.txt,.md,.csv" class="hidden">
+        <div class="files" id="wordFiles"></div>
+        <div class="hint" id="wordHint"></div>
+        <div class="hint warn" id="sizeWarn"></div>
+        <div class="row" style="margin-top:14px; align-items:flex-start">
+          <div style="display:flex;flex-direction:column;gap:6px;flex:1;min-width:260px">
+            <label class="chk"><input type="checkbox" id="waggr"> 激进模式（连没有上下文的疑似人名也脱，误杀更多）</label>
+            <label class="chk"><input type="checkbox" id="wstripimg"> 移除文档里的图片（Word 里的图脱不到，图上的 IP、系统名全留着）</label>
+            <input type="password" id="wmappwd" class="pw" autocomplete="new-password"
+                   placeholder="映射表口令（至少 6 位，还原时要用同一个）" style="max-width:420px">
+            <div class="hint danger">映射表里是原文对照，明文落到磁盘上等于没脱敏；口令丢了就还原不回来。</div>
+          </div>
+          <div style="display:flex;flex-direction:column;align-items:flex-end;gap:4px">
+            <button class="btn primary" id="goWord">开 始 脱 敏</button>
+            <span class="hint" id="wordProg" style="font-size:12px;min-height:16px"></span>
+          </div>
+        </div>
+        <div id="wordResult" class="hidden"></div>
+      </div>
+    </details>
   </section>
 
   <!-- ============ 还原 ============ -->
   <section id="pane-restore" class="hidden">
-    <div id="textRestoreHost"></div>
-
     <div class="card">
-      <h2><span class="n">1</span>脱敏后的文件</h2>
-      <div class="drop" id="drop2">
-        <div class="big">把脱敏文件拖到这里，或点击选择</div>
-        <div class="small">还原后会生成「原名_还原」文件</div>
-      </div>
-      <input type="file" id="picker2" accept=".docx,.txt,.md,.csv,.json,application/json" class="hidden">
-      <div class="files" id="files2"></div>
-    </div>
-    <div class="card">
-      <h2><span class="n">2</span>映射表 json</h2>
-      <div class="drop" id="drop3">
-        <div class="big">选择脱敏时生成的映射表</div>
-        <div class="small">脱敏时生成的 .json，改过名也认；选错了会直接说</div>
-      </div>
-      <input type="file" id="picker3" class="hidden">
-      <div class="files" id="files3"></div>
-      <div class="row" id="rpwdrow" style="margin-top:10px">
-        <input type="password" id="restorePwd" class="pw" autocomplete="off"
+      <h2><span class="n">1</span>粘贴脱敏后的文本</h2>
+      <textarea id="restoreIn" class="bigtext" rows="14"
+                placeholder="粘贴脱敏后的整篇文本，占位符会换回真名。"></textarea>
+      <div class="row" style="margin-top:12px">
+        <select id="mapSel" class="pw" style="max-width:330px"></select>
+        <button class="btn" id="mapPickBtn">选择映射表文件…</button>
+        <input type="file" id="mapPick" class="hidden" accept=".json,application/json">
+        <input type="password" id="restorePwd" class="pw" style="max-width:230px" autocomplete="off"
                placeholder="映射表口令（必填，至少 6 位）">
+        <button class="btn primary" id="go2" style="padding:9px 26px">还 原</button>
       </div>
+      <div class="hint" id="mapInfo"></div>
       <div class="hint danger">映射表是加密的，没有口令解不开；口令就是脱敏时设的那个。</div>
-      <div class="hint warn">还原后的文件等于原始资料，注意存放在哪台机器、哪个目录。</div>
+      <div class="hint warn">还原后的文本等于原始资料，注意别粘到不该粘的地方。</div>
     </div>
-    <div class="card">
-      <div class="row" style="justify-content:flex-end">
-        <button class="btn primary" id="go2">开 始 还 原</button>
-      </div>
-    </div>
-    <div id="result2" class="hidden"></div>
+    <div id="restoreResult" class="hidden"></div>
   </section>
 
   <div class="mapwarn">
@@ -276,19 +306,17 @@ header .tag{font-size:12px; color:#a8c6e6}
     <div>
       <p class="t">映射表里存的是原文，拿到它就能把脱敏件还原回去</p>
       <p class="s">它和脱敏件一起发出去，等于没脱敏。映射表强制用口令加密（不可关闭），但口令别跟着文件走——
-        对外只发带「_脱敏」的文件；映射表只在需要还原时用，用完单独存放或删掉，别跟脱敏件放在同一个文件夹里。</p>
+        对外只发脱敏后的文本；映射表只在需要还原时用，用完单独存放或删掉，别跟脱敏结果放在同一个文件夹里。</p>
     </div>
   </div>
 </main>
 
 <script>
 const $ = s => document.querySelector(s);
-let files = [], rfile = null, rmap = null, rmapText = null, rmapEnc = false, rmapOk = false;
+const PWD_MIN = 6;
+let files = [];
 
-/* 复制给 AI 时附带的提示词：AI 爱把 [人员1] 改成 [人员 1] 或翻译掉，加这句能少一半返工 */
-const PROMPT = '下面是一份文档。其中方括号加编号的是占位符（例如 [人员1]、[单位2]、[IP1]），\n'
-  + '请把它们当作真实名称原样保留：不要改写、不要翻译、不要解释、不要在括号里加空格。';
-
+/* ---------- 复制 ---------- */
 async function copyText(t){
   try {
     await navigator.clipboard.writeText(t);
@@ -307,17 +335,18 @@ async function copyText(t){
   }
 }
 
-
-/* 映射表口令：强制必填。空着或不足 6 位，「开始脱敏」就是灰的——
-   不留"不填也能跑"这条路，否则落盘的就是明文原文。 */
-const PWD_MIN = 6;
-function syncGo(){
-  const ok = $('#mappwd').value.trim().length >= PWD_MIN;
-  $('#go').disabled = !ok;
-  $('#pwdWhy').classList.toggle('danger', !ok);
+/* 复制按钮：点完变「已复制」，2 秒后变回来 */
+function wireCopy(btn, getText, info){
+  let timer = null;
+  btn.onclick = async () => {
+    const ok = await copyText(getText());
+    if (!ok) { if (info) info.textContent = '复制失败，请手动选中复制'; return; }
+    btn.textContent = '已复制';
+    if (info) info.textContent = '';
+    clearTimeout(timer);
+    timer = setTimeout(() => { btn.textContent = '复制'; }, 2000);
+  };
 }
-$('#mappwd').addEventListener('input', syncGo);
-syncGo();
 
 /* ---------- 标签切换 ---------- */
 document.querySelectorAll('.tab').forEach(t => t.onclick = () => {
@@ -327,7 +356,124 @@ document.querySelectorAll('.tab').forEach(t => t.onclick = () => {
   $('#pane-restore').classList.toggle('hidden', k !== 'restore');
 });
 
-/* ---------- 文件读取 ---------- */
+/* ---------- 口令：空着或不足 6 位，按钮就是灰的 ---------- */
+function syncTextGo(){
+  const ok = $('#mappwd').value.trim().length >= PWD_MIN;
+  $('#go').disabled = !ok;
+  $('#pwdWhy').classList.toggle('danger', !ok);
+}
+$('#mappwd').addEventListener('input', syncTextGo);
+syncTextGo();
+
+function syncWordGo(){
+  $('#goWord').disabled = $('#wmappwd').value.trim().length < PWD_MIN;
+}
+$('#wmappwd').addEventListener('input', syncWordGo);
+syncWordGo();
+
+/* ---------- 纯文本脱敏（主路径） ---------- */
+$('#go').onclick = async () => {
+  const text = $('#scrubIn').value;
+  if (!text.trim()) { alert('先把要脱敏的内容粘进来。'); $('#scrubIn').focus(); return; }
+  const mapPwd = $('#mappwd').value;
+  if (mapPwd.trim().length < PWD_MIN) {
+    alert('映射表口令至少 ' + PWD_MIN + ' 位。\n\n'
+      + '映射表里是原文对照，明文落到磁盘上等于没脱敏；还原时还要用同一个口令。');
+    $('#mappwd').focus();
+    return;
+  }
+  const btn = $('#go');
+  const prev = btn.innerHTML;
+  const prog = $('#goProg');
+  btn.disabled = true;
+  btn.innerHTML = '<span class="loading"></span>正在脱敏…';
+  prog.textContent = `已提交 ${text.length} 字，等后端处理…`;
+
+  const ac = new AbortController();
+  const timer = setTimeout(() => ac.abort(), 180000);
+  try {
+    const r = await fetch('/api/scrub', {
+      method: 'POST', headers: {'Content-Type':'application/json'},
+      body: JSON.stringify({
+        text,
+        words: $('#words').value,
+        aggressive: $('#aggr').checked,
+        mapPassword: mapPwd
+      }),
+      signal: ac.signal
+    });
+    const d = await r.json();
+    if (!d.ok) throw new Error(d.error || '处理失败');
+    renderTextResult(d);
+  } catch (e) {
+    const msg = (e && e.name === 'AbortError')
+      ? '处理超时（180 秒未返回）。文本太长时请分段处理。'
+      : (e.message || String(e));
+    const host = $('#textResult');
+    host.classList.remove('hidden');
+    host.innerHTML = `<div class="banner err">出错了：${esc(msg)}</div>`;
+  } finally {
+    clearTimeout(timer);
+    syncTextGo();
+    btn.innerHTML = prev;
+    prog.textContent = '';
+  }
+};
+
+function renderTextResult(d){
+  const host = $('#textResult');
+  const hits = ((d.review || {}).hits) || [];
+  const counts = d.counts || d.stat || {};
+  const countTxt = Object.entries(counts).sort((a, b) => b[1] - a[1])
+    .map(([k, v]) => `${esc(k)} ${v}`).join(' · ');
+  const banner = d.high > 0
+    ? `<div class="banner warn">已完成，但有 <b>${d.high}</b> 条高置信残留（机构名 / 地名 / 平台类单位名）。
+        把对应词加进敏感词表再跑一次。</div>`
+    : `<div class="banner ok">已完成。点「复制」，直接粘给 AI 即可。</div>`;
+  const leak = hits.length
+    ? `<div class="leak">
+         <div class="t">高危残留：脱敏后的文本里还能搜到 ${hits.length} 个真值</div>
+         <ul>${hits.slice(0, 12).map(h =>
+            `<li><code>${esc(h.value)}</code> 出现 ${h.count} 次</li>`).join('')}</ul>
+         <p class="s">这些词没被替换掉，发出去等于把真名发出去。建议把它们加进敏感词表重跑一次。</p>
+         <button class="btn" id="leakOk" style="margin-top:10px;border-color:#e7b0b0;color:#b91c1c">
+           我已确认，仍要复制</button>
+       </div>`
+    : (d.review && d.review.checked
+        ? `<div class="pass">复核通过：映射表里 ${d.review.checked} 个真值，脱敏后一次都没出现。</div>`
+        : `<div class="pass">本次没有替换任何内容，无需复核。</div>`);
+
+  host.classList.remove('hidden');
+  host.innerHTML = `
+    ${banner}
+    <div class="card">
+      <h2><span class="n">2</span>脱敏结果</h2>
+      <div class="copybar">
+        <button class="btn primary" id="copyOut" ${hits.length ? 'disabled' : ''}>复制</button>
+        <span class="hint" id="copyOutInfo"></span>
+      </div>
+      ${leak}
+      <textarea id="scrubOut" class="bigtext" readonly
+                placeholder="脱敏结果会显示在这里"></textarea>
+      <div class="hint" style="margin-top:10px">共替换 <b>${d.total}</b> 处${countTxt ? '：' + countTxt : ''}</div>
+      <div class="hint">映射表已保存：<span class="mono">${esc(d.dir)}\\${esc(d.mapfile)}</span>
+        （含原文，仅本机保留，切勿外发；还原时要输同一个口令）</div>
+    </div>`;
+
+  const out = host.querySelector('#scrubOut');
+  out.value = d.text || '';
+  const copyBtn = host.querySelector('#copyOut');
+  wireCopy(copyBtn, () => out.value, host.querySelector('#copyOutInfo'));
+  const leakOk = host.querySelector('#leakOk');
+  if (leakOk) leakOk.onclick = () => {
+    copyBtn.disabled = false;
+    leakOk.disabled = true;
+    leakOk.textContent = '已放行（确认过残留）';
+  };
+  host.scrollIntoView({behavior: 'smooth', block: 'start'});
+}
+
+/* ---------- Word 文件（保留，次要入口） ---------- */
 function readBase64(f){
   return new Promise((ok, bad) => {
     const r = new FileReader();
@@ -339,11 +485,9 @@ function readBase64(f){
 const fmt = n => n > 1048576 ? (n/1048576).toFixed(1)+' MB'
              : n > 1024 ? (n/1024).toFixed(0)+' KB' : n+' B';
 
-/* ---------- 拖拽通用 ---------- */
-// 与后端 desensitize.py 一致：.txt/.md/.csv/.docx（第 805、815 行）
+// 与后端 desensitize.py 一致：.txt/.md/.csv/.docx
 const OK_EXT = ['.docx', '.txt', '.md', '.csv'];
 const extOk = n => OK_EXT.some(e => String(n).toLowerCase().endsWith(e));
-const isJson = n => String(n).toLowerCase().endsWith('.json');
 
 // readEntries 一次最多返回 100 项，返回空数组才算读完，必须循环
 function readAllEntries(reader){
@@ -417,15 +561,12 @@ function wireDrop(dropEl, inputEl, onFiles, okFn = extOk){
   });
 }
 
-/* ---------- 脱敏：文件列表 ---------- */
-// 阈值和超时线都从服务端 /api/config 读，不在页面里写死——
-// 引擎提速或换机器时改服务端一处即可，不用人肉同步两处。
-// 读不到就退回下面这套默认值：接口失败不能让功能不可用。
-const HARD = 60 * 1024 * 1024;   // 浏览器侧硬上限（base64 后放大会卡死页面），与后端能力无关
+/* 阈值和超时线都从服务端 /api/config 读，不在页面里写死 */
+const HARD = 60 * 1024 * 1024;
 const CFG = { warn_mb: 5, max_free_mb: 5, timeout_base_s: 120, timeout_per_mb_s: 12, engine_version: "" };
 fetch('/api/config').then(r => r.json()).then(c => {
   Object.assign(CFG, c);
-  updateSizeWarn();   // 阈值可能变了，按当前已选文件重判一次
+  updateSizeWarn();
 }).catch(() => { /* 保持默认值 */ });
 
 function updateSizeWarn(){
@@ -447,13 +588,13 @@ function updateSizeWarn(){
 }
 
 function renderFiles(){
-  $('#files').innerHTML = files.map((f,i) => `
+  $('#wordFiles').innerHTML = files.map((f,i) => `
     <div class="file">
       <span class="nm">${esc(f.name)}</span>
       <span class="sz">${fmt(f.size)}</span>
       <button class="rm" data-i="${i}" title="移除">×</button>
     </div>`).join('');
-  $('#files').querySelectorAll('.rm').forEach(b => b.onclick = () => {
+  $('#wordFiles').querySelectorAll('.rm').forEach(b => b.onclick = () => {
     files.splice(+b.dataset.i, 1); renderFiles();
   });
   updateSizeWarn();
@@ -461,11 +602,11 @@ function renderFiles(){
 const esc = s => String(s).replace(/[&<>"']/g, c =>
   ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
 
-wireDrop($('#drop'), $('#picker'), (fs, skipped) => {
+wireDrop($('#wordDrop'), $('#wordPicker'), (fs, skipped) => {
   fs.forEach(f => { if (!files.some(x => x.name === f.name)) files.push(f); });
   renderFiles();
   const n = (skipped || []).length;
-  const el = $('#dropHint');
+  const el = $('#wordHint');
   if (el) {
     el.textContent = files.length
       ? `已选 ${files.length} 个文件` + (n ? `（跳过 ${n} 个不支持的类型）` : '')
@@ -474,101 +615,26 @@ wireDrop($('#drop'), $('#picker'), (fs, skipped) => {
   }
 });
 
-/* ---------- 还原：两个文件位 ---------- */
-// 映射表可能是加密的：读一眼 format 就知道要不要口令，别等点还原才报错
-async function checkMap(f){
-  rmapText = null; rmapEnc = false; rmapOk = false;
-  try {
-    const t = await f.text();
-    const d = JSON.parse(t) || {};
-    rmapEnc = d.format === 'desens-map-v2';
-    // 老版本明文映射表没有 format，靠 pairs 认；内容对不上的 json 一律不算映射表
-    rmapOk = rmapEnc || Array.isArray(d.pairs);
-    if (rmapOk) rmapText = t;
-  } catch (e) { rmapEnc = false; rmapOk = false; rmapText = null; }
-  $('#restorePwd').value = '';
-  syncGo2();
-}
-
-/* 还原也要口令：映射表是加密的，空着不放行 */
-function syncGo2(){
-  $('#go2').disabled = $('#restorePwd').value.trim().length < PWD_MIN;
-}
-$('#restorePwd').addEventListener('input', syncGo2);
-syncGo2();
-
-const MSG_NOT_MAP = '这不是映射表，映射表是脱敏时生成的 .json 文件';
-const MSG_MAP_HERE = '这是映射表，请放到下面第 2 格「映射表 json」';
-const fileRow = f => `<div class="file"><span class="nm">${esc(f.name)}</span>
-      <span class="sz">${fmt(f.size)}</span></div>`;
-
-/* 收下第 2 格的映射表：内容不对就不认，rmap 置空让「开始还原」拦下来 */
-async function takeMap(f){
-  rmap = f;
-  const box = $('#files3');
-  box.innerHTML = fileRow(f);
-  await checkMap(f);
-  if (!rmapOk) {
-    rmap = null;
-    box.innerHTML = fileRow(f) + `<div class="hint danger">${MSG_NOT_MAP}</div>`;
-  }
-}
-
-// 第 1 格：脱敏文件。拖进来的 .json 十有八九是映射表，不能静默丢掉——
-// 直接挪到第 2 格并说清楚，用户拖错了不该让他再拖一遍。
-wireDrop($('#drop2'), $('#picker2'), fs => {
-  const box = $('#files2');
-  const jsons = fs.filter(f => isJson(f.name));
-  const docs = fs.filter(f => !isJson(f.name));
-  if (docs.length) rfile = docs[0];
-  let html = rfile ? fileRow(rfile) : '';
-  if (jsons.length) {
-    takeMap(jsons[0]);
-    html += `<div class="hint danger">${MSG_MAP_HERE}（已自动填好）</div>`;
-  } else if (!docs.length && !rfile) {
-    html = '<div class="hint warn">没有可用的文件（支持 .docx / .txt / .md / .csv）</div>';
-  }
-  box.innerHTML = html;
-}, n => extOk(n) || isJson(n));
-
-// 第 2 格：映射表。不限扩展名，先接住再按内容判断——
-// Windows 的打开对话框按 accept 过滤，.json 有可能干脆看不见，那也会被当成"不支持"。
-wireDrop($('#drop3'), $('#picker3'), fs => {
-  if (!fs.length) {
-    $('#files3').innerHTML = `<div class="hint danger">${MSG_NOT_MAP}</div>`;
-    rmap = null; rmapText = null; rmapOk = false; syncGo2();
-    return;
-  }
-  takeMap(fs[0]);
-}, () => true);
-mountRestore($('#textRestoreHost'), {});   // 「还原」标签页的整篇粘贴还原
-
-/* ---------- 执行脱敏 ---------- */
-$('#go').onclick = async () => {
+$('#goWord').onclick = async () => {
   if (!files.length) { alert('先选文件。'); return; }
-  const mapPwd = $('#mappwd').value;
+  const mapPwd = $('#wmappwd').value;
   if (mapPwd.trim().length < PWD_MIN) {
     alert('映射表口令至少 ' + PWD_MIN + ' 位。\n\n'
       + '映射表里是原文对照，明文落到磁盘上等于没脱敏；还原时还要用同一个口令。');
-    $('#mappwd').focus();
+    $('#wmappwd').focus();
     return;
   }
   const totalBytes = files.reduce((s, f) => s + f.size, 0);
   const totalMB = totalBytes / 1048576;
 
-  // base64 会让体积再涨三分之一，且是一次性 JSON 提交，太大浏览器会卡死。
   if (totalBytes > HARD) {
     alert(`这批文件共 ${fmt(totalBytes)}，超过单次上限 ${fmt(HARD)}。`
       + '请分批处理——base64 编码后会再放大三分之一，一次性提交会让页面卡住。');
     return;
   }
 
-  // 超过阈值不偷偷放宽超时，先问一次。
-  // 用户不知道要等多久时，"还在跑"和"已经卡死"是同一件事，静默等 200 秒体验更差。
   let timeoutMs = CFG.timeout_base_s * 1000;
   if (totalMB > CFG.max_free_mb) {
-    // 参考区间按实测给的保守带宽：真实方案约 1 s/MB，极端样本约 3 s/MB。
-    // 不要说成 "MB × 12 秒"，那是超时上限，不是预计耗时——拿它当预估会把人吓跑。
     const lo = Math.max(1, Math.ceil(totalMB * 1));
     const hi = Math.ceil(totalMB * 3);
     const capSec = Math.max(CFG.timeout_base_s, Math.ceil(totalMB * CFG.timeout_per_mb_s));
@@ -583,18 +649,17 @@ $('#go').onclick = async () => {
     timeoutMs = capSec * 1000;
   }
 
-  const btn = $('#go');
-  const prevHtml = btn.innerHTML;
+  const btn = $('#goWord');
+  const prev = btn.innerHTML;
   btn.disabled = true;
   btn.innerHTML = '<span class="loading"></span>正在处理…';
-  const progEl = $('#goProg');
+  const progEl = $('#wordProg');
   const setProg = t => { if (progEl) progEl.textContent = t; };
-  // 整份文件 base64 后一次性 POST，几十 MB 会静默卡很久；到点没回就主动断，别让人对着死界面等
   const ac = new AbortController();
   const timer = setTimeout(() => ac.abort(), timeoutMs);
   try {
-    const payload = { files: [], words: $('#words').value, aggressive: $('#aggr').checked,
-                      stripImages: $('#stripimg').checked,
+    const payload = { files: [], words: $('#words').value, aggressive: $('#waggr').checked,
+                      stripImages: $('#wstripimg').checked,
                       mapPassword: mapPwd };
     for (let i = 0; i < files.length; i++) {
       const f = files[i];
@@ -608,30 +673,32 @@ $('#go').onclick = async () => {
     });
     const d = await r.json();
     if (!d.ok) throw new Error(d.error || '处理失败');
-    renderResult(d);
+    renderWordResult(d);
   } catch (e) {
     const msg = (e && e.name === 'AbortError')
       ? `处理超时（${Math.round(timeoutMs / 1000)} 秒未返回）。文件太大时请分批处理，或检查后台进程是否卡住。`
       : (e.message || String(e));
-    $('#result').classList.remove('hidden');
-    $('#result').innerHTML = `<div class="banner err">出错了：${esc(msg)}</div>`;
+    $('#wordResult').classList.remove('hidden');
+    $('#wordResult').innerHTML = `<div class="banner err">出错了：${esc(msg)}</div>`;
   } finally {
     clearTimeout(timer);
-    syncGo();                       // 口令被清空的话，按钮要重新变灰
-    btn.innerHTML = prevHtml;
+    syncWordGo();
+    btn.innerHTML = prev;
     setProg('');
   }
 };
 
-function renderResult(d){
-  window.__lastScrub = d;
+/* Word 结果：下载文件 / 报告 / 映射表，外加残留与元数据提示 */
+function renderWordResult(d){
+  const host = $('#wordResult');
+  const q = s => host.querySelector(s);
   const rev = d.review || {checked: 0, hits: [], total: 0};
   const hits = rev.hits || [];
 
-  const okBanner = d.high > 0
+  const banner = d.high > 0
     ? `<div class="banner warn">已完成，但有 <b>${d.high}</b> 条高置信残留（机构名 / 地名 / 平台类单位名）。
        把对应词加进敏感词表再跑一次，或人工核对报告第四节。</div>`
-    : `<div class="banner ok">已完成，未发现高置信残留。可以直接把「_脱敏」文件发出去。</div>`;
+    : `<div class="banner ok">已完成，未发现高置信残留。</div>`;
 
   const statRows = Object.entries(d.stat || {}).sort((a,b) => b[1]-a[1])
     .map(([k,v]) => `<tr><td>${esc(k)}</td><td class="mono">${v}</td></tr>`).join('');
@@ -640,7 +707,6 @@ function renderResult(d){
       <td>${esc(r.file)}</td><td>${esc(r.kind)}</td>
       <td class="mono">${r.line}</td><td class="mono">${esc(r.frag)}</td></tr>`).join('');
 
-  /* 可读性回检：只报机械特征（占位符被拆进词里），不阻断，红字列出 */
   const rdRows = (d.readability || []).map(r => `<tr>
       <td>${esc(r.file)}</td><td>${esc(r.kind)}</td>
       <td class="mono">${r.line}</td><td class="mono">${esc(r.frag)}</td></tr>`).join('');
@@ -648,28 +714,19 @@ function renderResult(d){
   const dl = (d.files || []).filter(f => f.out).map(f =>
     `<a class="safe" href="/dl?d=${encodeURIComponent(d.batch)}&f=${encodeURIComponent(f.out)}">下载 ${esc(f.out)}</a>`).join('');
 
-  /* ---- 自动复核：真值回搜脱敏文本，命中就锁住复制按钮 ---- */
   const leakHtml = hits.length
     ? `<div class="leak">
          <div class="t">高危残留：脱敏后的文本里还能搜到 ${hits.length} 个真值</div>
          <ul>${hits.slice(0, 12).map(h =>
             `<li><code>${esc(h.value)}</code> 出现 ${h.count} 次</li>`).join('')}</ul>
-         ${hits.length > 12 ? `<p class="s">（另有 ${hits.length - 12} 个未列出）</p>` : ''}
          <p class="s">这些词没被替换掉，发出去等于把真名发出去。建议把它们加进敏感词表重跑一次。</p>
-         <button class="btn" id="leakOk" style="margin-top:10px;border-color:#e7b0b0;color:#b91c1c">
+         <button class="btn" id="wordLeakOk" style="margin-top:10px;border-color:#e7b0b0;color:#b91c1c">
            我已确认，仍要复制</button>
        </div>`
     : (rev.checked
         ? `<div class="pass">复核通过：映射表里 ${rev.checked} 个真值，脱敏后一次都没出现。</div>`
         : `<div class="pass">本次没有替换任何内容，无需复核。</div>`);
 
-  const withText = (d.files || []).filter(f => typeof f.text === 'string');
-  const selHtml = withText.length > 1
-    ? `<select id="copySel" class="pw" style="max-width:260px">${withText.map((f, i) =>
-        `<option value="${i}">${esc(f.name)}</option>`).join('')}</select>`
-    : '';
-
-  /* ---- Word 里看不见、发出去对方却看得见的东西 ---- */
   const clearedFields = rev.metadata_cleared || [];
   const metaCard = rev.docx_cleaned ? `<div class="card">
       <h2>Word 隐藏内容（已清）</h2>
@@ -684,22 +741,19 @@ function renderResult(d){
       </tbody></table>
     </div>` : '';
 
+  const withText = (d.files || []).filter(f => typeof f.text === 'string');
   const copyCard = withText.length ? `<div class="card">
       <h2>复制脱敏文本（发给 AI）</h2>
       ${leakHtml}
       <div class="copyrow">
-        ${selHtml}
-        <label class="chk"><input type="checkbox" id="withPrompt" checked>
-          带提示词模板（防止 AI 改写占位符）</label>
-        <button class="btn primary" id="copyBtn" ${hits.length ? 'disabled' : ''}>复制到剪贴板</button>
-        <span class="hint" id="copyInfo"></span>
+        <button class="btn primary" id="wordCopy" ${hits.length ? 'disabled' : ''}>复制</button>
+        <span class="hint" id="wordCopyInfo"></span>
       </div>
-      <pre class="promptprev" id="promptPrev">${esc(PROMPT)}</pre>
     </div>` : '';
 
-  $('#result').classList.remove('hidden');
-  $('#result').innerHTML = `
-    ${okBanner}
+  host.classList.remove('hidden');
+  host.innerHTML = `
+    ${banner}
     <div class="card">
       <h2>处理结果</h2>
       <div class="stats">
@@ -728,11 +782,9 @@ function renderResult(d){
     ${rdRows ? `<div class="card" style="border-color:#f0b4b4;background:#fdfafa">
       <h2 style="color:var(--danger)">疑似误伤（${d.readabilityTotal || rdRows.length} 处，需人工确认）</h2>
       <div class="hint warn">这些位置像是把词拆开了，比如 <span class="mono">深[单位1]服</span>。
-        工具不判断通顺，只按字符位置报出来——请对照脱敏文件看一眼：确认拆坏了就人工改回来，
-        确认是正常替换（占位符前后本来就是普通汉字）就忽略这一条。</div>
+        工具不判断通顺，只按字符位置报出来——请对照脱敏文件看一眼。</div>
       <table style="margin-top:10px"><thead><tr><th>文件</th><th>现象</th><th>行号</th><th>片段</th></tr></thead>
       <tbody>${rdRows}</tbody></table>
-      <div class="hint">片段只含占位符和紧邻的 1 个字符，不含原文。</div>
     </div>` : ''}
     ${(d.media && d.media.length) ? `<div class="card" style="border-color:#f0b4b4;background:#fdfafa">
       <h2 style="color:var(--danger)">图片（${d.media[0].mode === 'strip' ? '已删除' : '未处理'}）</h2>
@@ -746,73 +798,30 @@ function renderResult(d){
       <h2 style="color:var(--danger)">映射表（仅本机，切勿外发）</h2>
       <div class="hint ${d.encrypted ? '' : 'warn'}">${d.encrypted
         ? '已用口令加密。别人拿到文件也打不开；你自己还原时要输同一个口令，口令丢了还原不回来。'
-        : '这个文件是明文的，里面就是全部原文。它只在你要还原时用得上，任何情况下都不要发给别人、不要上传网盘。'}</div>
+        : '这个文件是明文的，里面就是全部原文。任何情况下都不要发给别人。'}</div>
       <div class="dl" style="margin-top:10px">
         <a class="danger" href="/dl?d=${encodeURIComponent(d.batch)}&f=${encodeURIComponent(d.mapfile)}">下载映射表</a>
       </div>
-    </div>
-    <div class="restore-host"></div>`;
+    </div>`;
 
-  /* ---- 复制 / 放行 ---- */
-  const copyBtn = $('#copyBtn');
+  const copyBtn = q('#wordCopy');
   if (copyBtn) {
-    copyBtn.onclick = async () => {
-      const list = ((window.__lastScrub || {}).files || []).filter(f => typeof f.text === 'string');
-      const sel = $('#copySel');
-      const f = list[sel ? +sel.value : 0];
-      if (!f) return;
-      const txt = ($('#withPrompt').checked ? PROMPT + '\n\n' : '') + f.text;
-      const ok = await copyText(txt);
-      $('#copyInfo').textContent = ok ? `已复制 ${txt.length} 字，直接粘给 AI` : '复制失败，请手动选中复制';
-    };
-    const leakOk = $('#leakOk');
-    if (leakOk) leakOk.onclick = () => {
-      copyBtn.disabled = false;
-      leakOk.disabled = true;
-      leakOk.textContent = '已放行（确认过残留）';
-    };
+    const first = ((d.files || []).filter(f => typeof f.text === 'string'))[0];
+    wireCopy(copyBtn, () => first ? first.text : '', q('#wordCopyInfo'));
   }
-
-  mountRestore($('#result').querySelector('.restore-host'), {mapfile: d.mapfile, batch: d.batch});
-  window.scrollTo({top: 0, behavior: 'smooth'});
+  const leakOk = q('#wordLeakOk');
+  if (leakOk) leakOk.onclick = () => {
+    if (copyBtn) copyBtn.disabled = false;
+    leakOk.disabled = true;
+    leakOk.textContent = '已放行（确认过残留）';
+  };
 }
 
-/* ---------- 还原区：整篇粘贴还原（结果页和「还原」标签页共用） ---------- */
-function mountRestore(host, opt){
-  if (!host) return;
-  opt = opt || {};
-  host.innerHTML = `<div class="card" style="border-color:#cfe3fb;background:#fbfdff">
-    <h2>还原 AI 返回的内容</h2>
-    <div class="rthead">把 AI 改完的整篇内容贴进来，占位符会换回真名。
-      <b>[人员 1]</b> 这种被加了空格的也认；映射表里没有的占位符原样保留，不会瞎猜。</div>
-    <textarea class="rt-in" style="min-height:130px" placeholder="粘贴 AI 返回的整篇内容…"></textarea>
-    <div class="row" style="margin-top:10px">
-      <select class="rt-map pw" style="max-width:330px"></select>
-      <input class="rt-path pw" style="max-width:300px" placeholder="或手输映射表路径（可选）">
-      <input class="rt-pwd pw" type="password" style="max-width:230px" autocomplete="off"
-             placeholder="映射表口令（必填，至少 6 位）">
-      <button class="btn primary rt-go" style="padding:9px 22px">还 原</button>
-    </div>
-    <div class="hint danger rt-pwdmsg">映射表是加密的，没有口令解不开。</div>
-    <div class="hint rt-msg"></div>
-    <textarea class="rt-out" readonly style="min-height:130px;margin-top:8px"
-              placeholder="还原结果会显示在这里"></textarea>
-    <div class="row" style="margin-top:8px">
-      <button class="btn rt-copy" disabled>复制还原结果</button>
-      <span class="hint rt-info"></span>
-    </div>
-  </div>`;
+/* ---------- 还原：粘贴文本 ---------- */
+let pickedMapText = null;
 
-  const q = s => host.querySelector(s);
-  const sel = q('.rt-map');
-  const msg = q('.rt-msg');
-  // 口令必填：空着就把「还原」按灰，别让用户点了才看到 400
-  const pwdEl = q('.rt-pwd');
-  const goBtn = q('.rt-go');
-  const sync = () => { goBtn.disabled = pwdEl.value.trim().length < PWD_MIN; };
-  pwdEl.addEventListener('input', sync);
-  sync();
-
+function loadMaps(){
+  const sel = $('#mapSel');
   fetch('/api/maps').then(r => r.json()).then(dd => {
     const maps = dd.maps || [];
     if (!maps.length) {
@@ -822,66 +831,100 @@ function mountRestore(host, opt){
     sel.innerHTML = maps.map(m =>
       `<option value="${esc(m.file)}" data-batch="${esc(m.batch)}">${esc(m.file)} · ${esc(m.batch)}${m.enc ? ' · 加密' : ''}</option>`
     ).join('');
-    if (opt.mapfile) {
-      const i = [...sel.options].findIndex(o =>
-        o.value === opt.mapfile && (!opt.batch || o.dataset.batch === opt.batch));
-      if (i >= 0) sel.selectedIndex = i;
-    }
   }).catch(() => { sel.innerHTML = '<option value="">（读不到映射表列表）</option>'; });
+}
+loadMaps();
 
-  q('.rt-go').onclick = async () => {
-    const text = q('.rt-in').value;
-    if (!text.trim()) { msg.className = 'hint warn rt-msg'; msg.textContent = '先把 AI 返回的内容贴进来。'; return; }
-    if (q('.rt-pwd').value.trim().length < PWD_MIN) {
-      msg.className = 'hint danger rt-msg';
-      msg.textContent = '先填映射表口令（至少 ' + PWD_MIN + ' 位），映射表是加密的。';
-      q('.rt-pwd').focus();
-      return;
-    }
-    const typed = q('.rt-path').value.trim();
+$('#mapPickBtn').onclick = () => $('#mapPick').click();
+$('#mapPick').onchange = async () => {
+  const f = $('#mapPick').files[0];
+  $('#mapPick').value = '';
+  if (!f) return;
+  try {
+    const t = await f.text();
+    const d = JSON.parse(t) || {};
+    // 老版本明文映射表没有 format，靠 pairs 认
+    if (d.format !== 'desens-map-v2' && !Array.isArray(d.pairs)) throw new Error('not map');
+    pickedMapText = t;
+    $('#mapInfo').className = 'hint';
+    $('#mapInfo').textContent = `已选择映射表文件：${f.name}（优先于下拉选择）`;
+  } catch (e) {
+    pickedMapText = null;
+    $('#mapInfo').className = 'hint danger';
+    $('#mapInfo').textContent = '这不是映射表，映射表是脱敏时生成的 .json 文件';
+  }
+};
+
+function syncRestoreGo(){
+  $('#go2').disabled = $('#restorePwd').value.trim().length < PWD_MIN;
+}
+$('#restorePwd').addEventListener('input', syncRestoreGo);
+syncRestoreGo();
+
+$('#go2').onclick = async () => {
+  const text = $('#restoreIn').value;
+  if (!text.trim()) { alert('先把脱敏后的文本粘进来。'); $('#restoreIn').focus(); return; }
+  const pwd = $('#restorePwd').value;
+  if (pwd.trim().length < PWD_MIN) {
+    alert('先填映射表口令（至少 ' + PWD_MIN + ' 位）。映射表是加密的，没有口令解不开。');
+    $('#restorePwd').focus();
+    return;
+  }
+  const payload = { text, password: pwd };
+  if (pickedMapText) {
+    payload.map = pickedMapText;
+  } else {
+    const sel = $('#mapSel');
     const cur = sel.options[sel.selectedIndex];
-    const mapfile = typed || (cur ? cur.value : '');
-    if (!mapfile) { msg.className = 'hint warn rt-msg'; msg.textContent = '没有可用的映射表：请选一份，或手输路径。'; return; }
+    if (!cur || !cur.value) { alert('没有可用的映射表：请在输出目录里先脱敏一次，或手动选择映射表文件。'); return; }
+    payload.mapfile = cur.value;
+    payload.mapbatch = cur.dataset.batch || '';
+  }
 
-    const btn = q('.rt-go');
-    const prev = btn.innerHTML;
-    btn.disabled = true;
-    btn.innerHTML = '<span class="loading"></span>还原中…';
-    msg.className = 'hint rt-msg';
-    msg.textContent = '';
-    try {
-      const r = await fetch('/api/restore', {
-        method: 'POST', headers: {'Content-Type': 'application/json'},
-        body: JSON.stringify({
-          text, mapfile,
-          mapbatch: typed ? '' : (cur ? (cur.dataset.batch || '') : ''),
-          password: q('.rt-pwd').value
-        })
-      });
-      const dd = await r.json();
-      if (!dd.ok) throw new Error(dd.error || '还原失败');
-      q('.rt-out').value = dd.text;
-      q('.rt-copy').disabled = !dd.text;
-      const unk = dd.unknown || [];
-      q('.rt-info').textContent = `替换了 ${dd.replaced} 处` + (unk.length
-        ? `；${unk.length} 个占位符在映射表里找不到，原样保留：${unk.slice(0, 10).join('、')}${unk.length > 10 ? ' …' : ''}`
-        : '；没有不认识的占位符');
-    } catch (e) {
-      msg.className = 'hint warn rt-msg';
-      msg.textContent = e.message || String(e);
-      q('.rt-out').value = '';
-      q('.rt-copy').disabled = true;
-      q('.rt-info').textContent = '';
-    } finally {
-      sync();
-      btn.innerHTML = prev;
-    }
-  };
+  const btn = $('#go2');
+  const prev = btn.innerHTML;
+  btn.disabled = true;
+  btn.innerHTML = '<span class="loading"></span>还原中…';
+  try {
+    const r = await fetch('/api/restore', {
+      method: 'POST', headers: {'Content-Type':'application/json'},
+      body: JSON.stringify(payload)
+    });
+    const d = await r.json();
+    if (!d.ok) throw new Error(d.error || '还原失败');
+    renderRestoreResult(d);
+  } catch (e) {
+    const host = $('#restoreResult');
+    host.classList.remove('hidden');
+    host.innerHTML = `<div class="banner err">出错了：${esc(e.message || String(e))}</div>`;
+  } finally {
+    syncRestoreGo();
+    btn.innerHTML = prev;
+  }
+};
 
-  q('.rt-copy').onclick = async () => {
-    const ok = await copyText(q('.rt-out').value);
-    q('.rt-info').textContent = ok ? '已复制还原结果' : '复制失败，请手动选中复制';
-  };
+function renderRestoreResult(d){
+  const host = $('#restoreResult');
+  const unk = d.unknown || [];
+  host.classList.remove('hidden');
+  host.innerHTML = `
+    <div class="banner ok">还原完成。</div>
+    <div class="card">
+      <h2><span class="n">2</span>还原结果</h2>
+      <div class="copybar">
+        <button class="btn primary" id="restoreCopy">复制</button>
+        <span class="hint" id="restoreInfo"></span>
+      </div>
+      <textarea id="restoreOut" class="bigtext" readonly
+                placeholder="还原结果会显示在这里"></textarea>
+    </div>`;
+  const out = host.querySelector('#restoreOut');
+  out.value = d.text || '';
+  wireCopy(host.querySelector('#restoreCopy'), () => out.value, host.querySelector('#restoreInfo'));
+  host.querySelector('#restoreInfo').textContent = `替换了 ${d.replaced} 处` + (unk.length
+    ? `；${unk.length} 个占位符在映射表里找不到，原样保留：${unk.slice(0, 10).join('、')}${unk.length > 10 ? ' …' : ''}`
+    : '；没有不认识的占位符');
+  host.scrollIntoView({behavior: 'smooth', block: 'start'});
 }
 
 async function openDir(){
@@ -890,71 +933,15 @@ async function openDir(){
 
 /* ---------- 演示模式：便于自检界面与给别人看效果 ---------- */
 if (location.hash === '#demo') {
-  renderResult({
-    total: 60, riskTotal: 3, high: 1, code: 2,
-    dir: '脱敏输出\\gui_20240101_000000',
-    batch: 'gui_20240101_000000',
-    files: [{name:'客户方案.docx', out:'客户方案_脱敏.docx', count:45,
-             text:'一、项目概况\n建设单位：[单位1]\n项目负责人：[人员1]\n应用地址：[IP1]'}],
-    mapfile: '映射表_20240101_000000.json', report: '脱敏报告_20240101_000000.md',
-    review: {checked: 27, total: 0, hits: []},
-    stat: {IP:10, 型号:7, 单位:6, 编号:5, 人员:5, 电话:3, 地址:2, 账号:2,
-           域名:2, 路径:1, 邮箱:1, 证件号:1},
-    readability: [
-      {file:'客户方案.docx', kind:'占位符被拆在词中间', line:12, frag:'深[单位1]服'},
-      {file:'客户方案.docx', kind:'占位符紧贴中文标点', line:18, frag:'，[厂商1]'}
-    ],
-    readabilityTotal: 2,
-    risks: [
-      {file:'客户方案.docx', kind:'疑似地名残留', line:12, frag:'高*区'},
-      {file:'客户方案.docx', kind:'疑似机构名（未命中后缀规则）', line:31, frag:'某*分部'},
-      {file:'客户方案.docx', kind:'疑似人名（误报较多，需人工确认）', line:47, frag:'张*'}
-    ]
+  renderTextResult({
+    total: 60, high: 1, dir: '脱敏输出\\gui_20240101_000000',
+    mapfile: '映射表_20240101_000000.json',
+    counts: {IP:10, 型号:7, 单位:6, 编号:5, 人员:5, 电话:3, 地址:2, 账号:2,
+             域名:2, 路径:1, 邮箱:1, 证件号:1},
+    review: {checked: 27, hits: []},
+    text: '一、项目概况\n建设单位：[单位1]\n项目负责人：[人员1]\n应用地址：[IP1]\n联系电话：[电话1]'
   });
 }
-
-$('#go2').onclick = async () => {
-  // 缺哪样说哪样：笼统报「还原失败」用户不知道该补第 1 格还是第 2 格
-  if (!rfile) { alert('请先把脱敏后的文件拖到第 1 格。'); return; }
-  if (!rmap) { alert('请先选映射表（脱敏时生成的 .json）。'); return; }
-  if (!rmapOk) { alert(MSG_NOT_MAP + '。'); return; }
-  const mapPwd = $('#restorePwd').value;
-  if (mapPwd.trim().length < PWD_MIN) {
-    alert('先填映射表口令（至少 ' + PWD_MIN + ' 位）。映射表是加密的，没有口令解不开。');
-    $('#restorePwd').focus(); return;
-  }
-  const btn = $('#go2');
-  btn.disabled = true;
-  btn.innerHTML = '<span class="loading"></span>正在还原…';
-  try {
-    const mapText = rmapText || await rmap.text();
-    const payload = {
-      name: rfile.name,
-      data: await readBase64(rfile),
-      map: mapText,
-      mapPassword: mapPwd
-    };
-    const r = await fetch('/api/restore', {
-      method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify(payload)
-    });
-    const d = await r.json();
-    if (!d.ok) throw new Error(d.error || '还原失败');
-    $('#result2').classList.remove('hidden');
-    $('#result2').innerHTML = `
-      <div class="banner ok">还原完成。</div>
-      <div class="card">
-        <div class="dl"><a class="safe" href="/dl?d=${encodeURIComponent(d.batch)}&f=${encodeURIComponent(d.out)}">下载 ${esc(d.out)}</a>
-        <button class="btn ghost" onclick="openDir()">打开输出目录</button></div>
-        <div class="hint">输出目录：<span class="mono">${esc(d.dir)}</span></div>
-      </div>`;
-  } catch (e) {
-    $('#result2').classList.remove('hidden');
-    $('#result2').innerHTML = `<div class="banner err">出错了：${esc(e.message)}</div>`;
-  } finally {
-    syncGo2();
-    btn.textContent = '开 始 还 原';
-  }
-};
 
 /* ---------- 服务存活检测：黑窗口一关，页面立刻说清楚，不让你瞎点 ---------- */
 (function watchdog(){
