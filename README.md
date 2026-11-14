@@ -136,16 +136,26 @@ Word 文件还会顺带清掉 Word 里看不见、发出去对方却看得见的
 
 ## 怎么用
 
-**最简单**：双击 `启动脱敏工具.bat`（需要装 Python 3.8+），浏览器会自动打开。
-把文件拖进虚线框就行。
+三条路，按「多久用一次」选。
 
-**或者**：
+### 一、剪贴板守护（最常用：把一段话贴给 AI 之前）
 
-```bash
-python desensitize_server.py
-```
+双击 `DesensClip.exe`（或 `python clip/clipwatch.py`），缩到托盘。
+之后你**复制**一段含单位名/人名/电话的文字，右下角弹一张卡片：
 
-**命令行**（适合批处理）：
+> 脱敏助手
+> 命中 2 处 · 2 类：单位 1、电话 1
+> 点「脱敏」把剪贴板换成脱敏版
+
+点「脱敏」→ 剪贴板直接变干净，接着 Ctrl+V 粘给 AI。想还原就点「还原」。
+它只处理纯文本，只在你复制之后看一眼剪贴板，不抢焦点、不留原文。
+
+### 二、图形界面（整份文件）
+
+**最简单**：双击 `DesensTool.exe`（或 `启动脱敏工具.bat`，需要 Python 3.8+）。
+选文件 → 设定输出目录 → 设口令 → 开始。出三样：脱敏件、映射表、脱敏报告。
+
+### 三、命令行（批量）
 
 ```bash
 python desensitize.py 客户端资料.docx --map-password 口令   # 口令必填，至少 6 位
@@ -162,34 +172,51 @@ python desensitize.py 脱敏版.docx --restore out/desens/映射表_xxx.json --m
 
 ### 用自定义词表
 
-自动识别总有漏的，尤其是行业内部叫法。最可靠的办法是把这些词写成文本文件，
-一行一个，`#` 开头是注释，然后 `--dict` 传进去。界面上也有对应入口。
+自动识别总有漏的，尤其是行业内部叫法。最靠谱的办法是把这些词写成文本文件
+（仓库里的 `敏感名单.example.txt` 可以直接改名用），一行一个，`#` 开头是注释：
+
+```
+[单位]
+某某市大数据中心
+[项目]
+星海数据中台
+```
+
+放在 `desensitize.py`（或 `DesensTool.exe`）同目录即自动加载，也可以用 `--dict` 显式指定。
+**写进去的词一定被替换**，哪怕程序自己认不出来——这是兜底，也是最后一道闸。
 
 ## 打包成 exe
 
-不想给同事装 Python，就打一个单文件 exe：
+不想给同事装 Python，就打单文件 exe：
 
 ```bash
 pip install pyinstaller python-docx
+
+# 生成两个 exe
 pyinstaller DesensTool.spec --noconfirm
+cd clip && pyinstaller --noconfirm --onefile --windowed --name DesensClip \
+  --paths .. --add-data "../app.ico;." clipwatch.py
 ```
 
-产物在 `dist/DesensTool.exe`，双击即用。
-
-`console=False` 所以不弹黑框；`datas` 把 `ui/index.html` 打进包里，
-所以 exe 是自包含的，拷到别的机器上也能跑。
+产物：`dist/DesensTool.exe`（文件处理）、`clip/dist/DesensClip.exe`（剪贴板守护）。
+打包版把状态与映射表放在 `%LOCALAPPDATA%\DesensClip\`，不写在 exe 旁边。
 
 ## 回归基线
 
-改完之后跑一下这个，数字对不上就是改坏了：
+改完跑这一条，十项全 PASS 才算没改坏：
 
-```
-sample.txt 普通模式  → 替换 24 处
-sample.txt 激进模式  → 替换 26 处
+```bash
+python tests/regress.py
 ```
 
-另外 `python -c "import desensitize"` 要能导入（没装 python-docx 也能导入，
-只有处理 docx 时才需要它）。
+覆盖：纯文本零残留 · 还原逐字一致 · 地址尾链 · docx 页眉页脚 · docx 格式保真 ·
+5/20/60 段文档的人名 · 常见词不被误杀。
+
+剪贴板守护单独一条（27 项，含「不抢焦点」「连续复制只提醒一次」）：
+
+```bash
+python tests/verify_clip.py
+```
 
 ## 依赖
 

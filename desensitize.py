@@ -85,8 +85,11 @@ class Mapper:
         self.stat[cat] = self.stat.get(cat, 0) + 1
         return ph
 
-    def dump(self, password=None):
-        """password 非空则加密。映射表=原文全集，明文落盘的代价是全盘皆输。"""
+    def dump(self, password=None, sources=None):
+        """password 非空则加密。映射表=原文全集，明文落盘的代价是全盘皆输。
+
+        sources 记录本次处理的原始文件（名字/路径/指纹），还原后据此找原文做逐字比对。
+        """
         # 别名不单独占编号：pairs 只留规范名，别名记在 aliases 里备查。
         pairs = [{"category": c, "placeholder": p, "original": o}
                  for (c, o), p in self.forward.items()]
@@ -99,6 +102,8 @@ class Mapper:
         }
         if aliases:
             body["aliases"] = aliases
+        if sources:
+            body["sources"] = sources
         return encrypt_map(body, password) if password else body
 
 
@@ -573,10 +578,21 @@ RE_STREET = re.compile(
 # 楼宇名：技术文本里"大厦/广场/大楼"几乎不会作为通用词出现，单独认是安全的。
 # 只认这三类，不碰"中心/园区"，避免误伤"数据中心""园区网"。
 RE_BUILDING = re.compile(r"[\u4e00-\u9fa5]{2,12}(?:大厦|广场|大楼)")
-# 地址尾部："B座3层""12层1203室"，跟在大厦/门牌后面时一并吃掉
-RE_ADDR_TAIL = re.compile(r"(?:[A-Za-z]\s*)?\d{0,3}\s*座(?:\s*\d{1,3}\s*层)?"
-                          r"|(?<![0-9])\d{1,3}\s*层(?:\s*\d{1,4}\s*室)?"
-                          r"|(?<![0-9])\d{1,4}\s*室")
+# 地址尾部的门牌链：跟在大厦/门牌/行政区划后面时一并吃掉。
+# 只认到"号"会把 "[地址1] 3 号楼 501 室" 这种半截结果留在外面，所以
+# 楼栋、单元、楼层、房号连成一串认，且允许连续出现（3 号楼 501 室）：
+#   3 号楼 / 12 栋 / B 座 3 层 / 第二办公楼 7 层 / 5 单元 601 / 88 号院
+# 数字位允许中文数字（"第二办公楼"），也允许字母（"B 座"）。
+_ADDR_TAIL_NUM = r"[A-Za-z0-9一二三四五六七八九十百零〇两]{1,6}"
+RE_ADDR_TAIL = re.compile(
+    r"(?:[ \t\u3000]*(?:"
+    r"第?\s*" + _ADDR_TAIL_NUM + r"\s*(?:办公楼|写字楼|综合楼|商务楼|宿舍楼)"
+    r"|第?\s*" + _ADDR_TAIL_NUM + r"\s*(?:号楼|号院|号房|栋|幢|座|楼)"
+    r"|第?\s*" + _ADDR_TAIL_NUM + r"\s*(?:单元|门)"
+    r"|第?\s*" + _ADDR_TAIL_NUM + r"\s*(?:层|地下室)"
+    r"|第?\s*" + _ADDR_TAIL_NUM + r"\s*(?:室|户)"
+    r"))+"
+)
 # 链式行政区划：省+市、市+区/县。只认连续两级，避免"服务器区""三个区域"被误伤
 RE_ADMIN_CHAIN = re.compile(
     r"[\u4e00-\u9fa5]{2,3}(?:省|自治区)[\u4e00-\u9fa5]{2,4}(?:市|州|盟)(?:[\u4e00-\u9fa5]{2,4}(?:区|县|市))?"
@@ -668,11 +684,165 @@ WHITELIST_BOUND = set(
 # 已知厂商 / 产品单独分类：它们是"谁家的东西"，不是客户自己的单位名。
 # 用户口径：公开厂商也脱。密评材料里出现具体厂商名可反推项目，
 # 而且方案里已经有 [厂商N] 这一类，不脱就与它不一致。
-VENDORS = ("深信服", "浪潮", "华为", "新华三", "华三", "天融信", "奇安信", "启明星辰",
-           "绿盟", "安恒", "四川虹信", "虹信", "三未信安", "光电安辰", "伟思",
-           "吉大正元", "卫士通", "中电科", "格尔软件", "数字认证", "江南天安",
-           "三零卫士", "得安信息", "海泰方圆", "信安世纪", "江南信安")
-PRODUCTS = ("统信 UOS", "PolarDB", "OceanBase", "GaussDB", "TiDB", "达梦", "麒麟", "渔翁")
+#
+# 名单外置：内置默认值只作兜底。程序启动时读外部名单文件，在内置名单后追加；
+# 用户加自己的单位名、客户名、项目名不用改代码。文件不存在就只用内置默认值。
+#   默认文件名：敏感名单.txt（放在程序/exe 同目录，找不到再找当前目录）
+#   可用环境变量 DESENS_LISTS 指定其他路径（便于测试和多套名单切换）
+DEFAULT_VENDORS = ("深信服", "浪潮", "华为", "新华三", "华三", "天融信", "奇安信", "启明星辰",
+                   "绿盟", "安恒", "四川虹信", "虹信", "三未信安", "光电安辰", "伟思",
+                   "吉大正元", "卫士通", "中电科", "格尔软件", "数字认证", "江南天安",
+                   "三零卫士", "得安信息", "海泰方圆", "信安世纪", "江南信安",
+                   "科来", "瑞数", "天空卫士")
+DEFAULT_PRODUCTS = ("统信 UOS", "PolarDB", "OceanBase", "GaussDB", "TiDB", "达梦", "麒麟", "渔翁")
+
+LIST_FILE_ENV = "DESENS_LISTS"
+LIST_FILE_NAMES = ("敏感名单.txt", "敏感名单.md", "desensitize-lists.txt")
+
+_SECTION_CATS = {
+    "单位": "单位", "单位名": "单位", "机构": "单位", "客户": "单位", "客户名": "单位",
+    "组织": "单位", "unit": "单位", "org": "单位", "organization": "单位", "client": "单位",
+    "品牌": "厂商", "厂商": "厂商", "brand": "厂商", "vendor": "厂商",
+    "产品": "产品", "产品名": "产品", "product": "产品",
+    "品牌型号": "型号", "型号": "型号", "model": "型号",
+    "项目": "系统", "项目名": "系统", "系统": "系统", "系统名": "系统",
+    "project": "系统", "system": "系统",
+    "自定义": "未分类", "custom": "未分类",
+}
+
+
+def _app_dir():
+    """程序所在目录。打包成 exe 后 __file__ 在临时解包目录，名单要跟着 exe 走。"""
+    if getattr(sys, "frozen", False):
+        return os.path.dirname(os.path.abspath(sys.executable))
+    return os.path.dirname(os.path.abspath(__file__))
+
+
+def _list_path():
+    env = os.environ.get(LIST_FILE_ENV)
+    if env:
+        return os.path.abspath(os.path.expanduser(env))
+    for base in (_app_dir(), os.getcwd()):
+        for name in LIST_FILE_NAMES:
+            p = os.path.join(base, name)
+            if os.path.isfile(p):
+                return p
+    return os.path.join(_app_dir(), LIST_FILE_NAMES[0])
+
+
+def _section_cat(title):
+    t = re.sub(r"\s+", "", title.strip().strip("#*[]【】"))
+    for suf in ("名单", "列表", "清单", "名称"):
+        if t.endswith(suf) and len(t) > len(suf):
+            t = t[:-len(suf)]
+    return _SECTION_CATS.get(t) or _SECTION_CATS.get(t.lower())
+
+
+def _parse_list_file(path):
+    """解析外部名单。
+
+    每行一个词；# / // / ; 开头为注释。分节写法支持三种：
+        [单位]          或  ## 单位
+        [品牌型号]      或  ## 品牌型号
+        [项目]          或  ## 项目
+    也支持单行标签：单位名：XXX、品牌型号：XXX、项目名：XXX。
+    不写分节时按词尾自动归类（公司/局→单位，…平台/项目→系统，字母数字→型号）。
+    """
+    entries = []
+    section = None
+    text = None
+    for enc in ("utf-8-sig", "gbk", "utf-16"):
+        try:
+            with open(path, "r", encoding=enc) as fh:
+                text = fh.read()
+            break
+        except UnicodeDecodeError:
+            continue
+    if text is None:
+        raise UnicodeError("名单文件编码无法识别")
+    for raw in text.splitlines():
+        s = raw.strip()
+        if not s:
+            continue
+        m = re.match(r"^\[{1,2}\s*(.+?)\s*\]{1,2}$", s)
+        if not m:
+            m = re.match(r"^#{1,6}\s*(.+?)\s*#*$", s)
+        if m:
+            cat = _section_cat(m.group(1))
+            if cat:
+                section = cat
+            # 认不出的标题/普通注释行不改当前分节
+            continue
+        if s.startswith(("#", "//", ";")):
+            continue
+        m = re.match(
+            r"^(单位名?|机构|客户名?|品牌型号|品牌|厂商|产品名?|型号|项目名?|系统名?)"
+            r"\s*[:：]\s*(.+)$", s)
+        if m:
+            cat = _section_cat(m.group(1)) or "未分类"
+            term = m.group(2).strip()
+            if term:
+                entries.append((cat, term))
+            continue
+        cat = section if section else _classify_entity(s)
+        if cat == "型号" and not re.search(r"[A-Za-z0-9]", s):
+            # [品牌型号] 下只写了一个纯中文品牌名，按厂商记
+            cat = "厂商"
+        entries.append((cat, s))
+    return entries
+
+
+def load_lists():
+    """内置默认 + 外部名单，去重后返回 (vendors, products, 其他条目, 信息)。"""
+    path = _list_path()
+    exists = os.path.isfile(path)
+    entries = []
+    if exists:
+        try:
+            entries = _parse_list_file(path)
+        except (OSError, UnicodeError):
+            # 读不到/编码不对都不能让主程序起不来，回落内置名单
+            entries = []
+    vendors, products, others = [], [], []
+    seen_v, seen_p, seen_o = set(), set(), set()
+
+    for x in DEFAULT_VENDORS:
+        k = x.lower()
+        if k not in seen_v:
+            seen_v.add(k)
+            vendors.append(x)
+    for x in DEFAULT_PRODUCTS:
+        k = x.lower()
+        if k not in seen_p:
+            seen_p.add(k)
+            products.append(x)
+    for cat, term in entries:
+        term = term.strip()
+        if not term:
+            continue
+        if cat == "厂商":
+            k = term.lower()
+            if k not in seen_v:
+                seen_v.add(k)
+                vendors.append(term)
+        elif cat == "产品":
+            k = term.lower()
+            if k not in seen_p:
+                seen_p.add(k)
+                products.append(term)
+        else:
+            k = (cat, term)
+            if k not in seen_o:
+                seen_o.add(k)
+                others.append((cat, term))
+    info = {"path": path, "exists": exists, "entries": len(entries),
+            "vendors": len(vendors), "products": len(products), "custom": len(others)}
+    return tuple(vendors), tuple(products), others, info
+
+
+VENDORS, PRODUCTS, EXTERNAL_ENTRIES, LIST_INFO = load_lists()
+# 外部名单是用户点名的敏感词，白名单不能把它挡掉（deny-list 优先）。
+EXTERNAL_TERMS = frozenset(term for _cat, term in EXTERNAL_ENTRIES)
 
 RE_VENDOR = re.compile(
     "|".join(re.escape(v) for v in sorted(VENDORS, key=len, reverse=True)) + r"(?!云)")
@@ -813,7 +983,10 @@ RE_PERSON_BEFORE_ROLE = re.compile(
 # 那比漏脱更糟：文本被改坏就看不懂了。
 NAME_VERBS = ("提出|表示|指出|认为|补充|强调|要求|负责|介绍|说明|建议|同意|"
               "决定|安排|汇报|报告|回复|答复|确认|签字|审核|批准|编制|操作|"
-              "使用|维护|主持|参加|出席|发言|询问|回答")
+              "使用|维护|主持|参加|出席|发言|询问|回答|"
+              # 页脚/脚注里常见的署名动作："王芳整理""李明录入"
+              "整理|编写|起草|撰写|拟稿|校对|录入|打印|归档|复核|汇总|"
+              "收集|提供|陪同|见证|记录|实施|整改|联络|对接|检查|核对")
 RE_LOOSE_NAME = re.compile(
     r"(?:^|[，。；：、！？\s（()【】])([\u4e00-\u9fa5]{2,3})"
     r"(?=[，。；：、！？\s（()）【】]|$|(?:%s))" % NAME_VERBS,
@@ -824,8 +997,13 @@ RE_LOOSE_NAME = re.compile(
 LOOSE_BAD_HEAD = set("经据按依对向在由从至为是该本其此这那各全同共并且与和及或")
 
 
-def _is_name(nm, ctx=None):
-    """姓氏白名单 + 词边界 + 整篇词频，三重约束。"""
+def _is_name(nm, ctx=None, strict_freq=True):
+    """姓氏白名单 + 词边界 + 整篇词频，三重约束。
+
+    strict_freq=False：调用方已经有强上下文（如「联系人张建国」「张主任」），
+    此时不做词频否决——真实报告里同一个人名出现十几次是常态，
+    用词频挡掉等于让最该遮的人名漏出去。
+    """
     if not (2 <= len(nm) <= 3):
         return False
     if nm in NOT_NAME or nm in NEVER_ENTITY:
@@ -837,7 +1015,8 @@ def _is_name(nm, ctx=None):
     if any(w in nm for w in NAME_BAD_SUB):
         return False
     # 整篇出现 10 次以上的词不可能是人名（"符合""应用""安全""关键"都远超）
-    if ctx is not None and ctx.count(nm) >= 10:
+    # 只在没有强上下文时用这条（见 strict_freq）
+    if strict_freq and ctx is not None and ctx.count(nm) >= 10:
         return False
     return True
 
@@ -848,6 +1027,7 @@ def _scan_name_list(text, pos, ctx):
     分隔符比姓名本身更可靠：一旦某个 token 不是人名，后面就不再是名单。
     "联系人：张三，职务：技术负责人" 里的"职务"必须挡住，
     否则"技术负责人"会被当成下一个名字。
+    这里已有强上下文（紧跟在角色/姓名标签之后），不做词频否决。
     """
     out = []
     while True:
@@ -858,7 +1038,7 @@ def _scan_name_list(text, pos, ctx):
         if not m:
             break
         nm = m.group(1)
-        if not _is_name(nm, ctx):
+        if not _is_name(nm, ctx, strict_freq=False):
             break
         out.append((m.start(1), m.end(1), "人员", nm))
         pos = m.end(1)
@@ -876,13 +1056,13 @@ def find_persons(text, loose=False, ctx=None):
     for rx in (RE_PERSON_AFTER_ROLE, RE_PERSON_LABEL_COLON, RE_PERSON_LABEL_LINE):
         for m in rx.finditer(text):
             nm = m.group(1)
-            if _is_name(nm, ctx):
+            if _is_name(nm, ctx, strict_freq=False):
                 out.append((m.start(1), m.end(1), "人员", nm))
                 out.extend(_scan_name_list(text, m.end(1), ctx))
     # 形态二：姓名 + 职务（张主任、李工程师）
     for m in RE_PERSON_BEFORE_ROLE.finditer(text):
         nm = m.group(1)
-        if _is_name(nm, ctx):
+        if _is_name(nm, ctx, strict_freq=False):
             out.append((m.start(1), m.end(1), "人员", nm))
     # 形态三（仅激进模式）：孤立人名
     if loose:
@@ -944,12 +1124,16 @@ def _addr_glue(gap):
     "山东省济南市高新区" + "舜华路街道" + "新泺大街2008号" 是同一个地址：
     中间的"舜华路街道"整段都是路名，必须并进去，否则会出现
     "山东省济[地址1]南市…" 这种把市名切开的占位符。
+    换行隔开的是两条独立记录，不合并。
     """
+    if "\n" in gap or "\r" in gap:
+        return False
     if len(gap) <= 8 and all(ch in ADDR_GLUE or ch.isspace() for ch in gap):
         return True
     if gap.endswith("街道") and len(gap) <= 10 and gap[-3] in "路街":
         return True
     return False
+
 
 def _merge_address_spans(text, spans):
     """把紧邻的地址段拼成一整段，并把紧贴的邮编并进来。
@@ -1100,6 +1284,10 @@ def filter_whitelist(text, hits):
             out.append(h)
             continue
         if cat in ENTITY_CATS:
+            # 外部名单是用户明确点名的，先于白名单
+            if raw in EXTERNAL_TERMS:
+                out.append(h)
+                continue
             # 硬闸门：评估结果闭集与技术词，出现在任何位置都不换
             if raw in NEVER_ENTITY:
                 continue
@@ -1199,6 +1387,34 @@ def find_custom(text, words):
                 break
             out.append((i, i + len(w), cat, w))
             start = i + len(w)
+    return out
+
+
+def find_listed(text, entries):
+    """外部名单（deny-list）：用户点名的单位/客户/项目/型号，先于模式规则命中。
+
+    名单里是完整词，直接精确查找；带空格的品牌型号允许空格数量不同。
+    长词与短词重叠时由 collect() 的最长匹配兜住。
+    """
+    out = []
+    for cat, term in entries:
+        term = term.strip()
+        if not term:
+            continue
+        if " " in term or "\t" in term:
+            parts = [re.escape(p) for p in re.split(r"\s+", term)]
+            rx = re.compile(r"\s+".join(parts),
+                            re.I if re.search(r"[A-Za-z]", term) else 0)
+            for m in rx.finditer(text):
+                out.append((m.start(), m.end(), cat, term))
+        else:
+            start = 0
+            while True:
+                i = text.find(term, start)
+                if i < 0:
+                    break
+                out.append((i, i + len(term), cat, term))
+                start = i + len(term)
     return out
 
 
@@ -1582,6 +1798,7 @@ def collect(text, custom_words=(), aggressive=False, ctx=None, strict_docid=Fals
     hits += find_report_ids(text)
     hits += find_lexicon(text, ctx)
     hits += find_custom(text, custom_words)
+    hits += find_listed(text, EXTERNAL_ENTRIES)
     hits += find_plans(text)
     hits += find_projects(text)
     hits += find_orgs(text)
@@ -1692,13 +1909,18 @@ MERGE_CATS = {"单位", "系统", "未分类", "地址"}
 
 
 def _merge_adjacent_hits(text, chosen):
-    """相邻的同类实体合成一个。占位符右边紧跟同类实体残片 = 上一轮拆开了。"""
+    """相邻的同类实体合成一个。占位符右边紧跟同类实体残片 = 上一轮拆开了。
+
+    只合并同一行内被一个空格隔开的残片。换行隔开的是两条独立记录
+    （"…501 室\\n江苏省…" 是两个地址），合并会把整行吃掉。
+    """
     out = []
     for s, e, cat, raw in chosen:
         if out:
             ps, pe, pc, praw = out[-1]
             gap = text[pe:s]
             if (pe <= s and len(gap) <= 1 and not gap.strip()
+                    and "\n" not in gap and "\r" not in gap
                     and pc in MERGE_CATS and cat in MERGE_CATS):
                 out[-1] = (ps, e, pc, praw + gap + raw)
                 continue
@@ -1887,15 +2109,49 @@ def readability_scan(text):
 
 # ---------------------------------------------------------------- 文件处理
 
-def read_txt(path):
-    for enc in ("utf-8", "utf-8-sig", "gbk", "cp936"):
+def _detect_newline(data):
+    """判断源文件是 CRLF 还是 LF。缺省 LF，混合时按多数。
+
+    必须在字节层判断：Python 的通用换行读入时会把 \r\n 抹成 \n，
+    写回时又按平台习惯自动补 \r\n，这正是"内存里一致、落盘不一致"的根源。
+    """
+    crlf = data.count(b"\r\n")
+    lf = data.count(b"\n") - crlf
+    return "\r\n" if crlf > lf else "\n"
+
+
+def read_txt_ex(path):
+    """返回 (文本, 编码, 换行风格)。文本一律统一成 \n，换行风格单独记着。"""
+    with open(path, "rb") as f:
+        data = f.read()
+    nl = _detect_newline(data)
+    text, enc = None, None
+    for cand in ("utf-8", "utf-8-sig", "gbk", "cp936"):
         try:
-            with open(path, "r", encoding=enc) as f:
-                return f.read(), enc
+            text, enc = data.decode(cand), cand
+            break
         except UnicodeDecodeError:
             continue
-    with open(path, "r", encoding="utf-8", errors="replace") as f:
-        return f.read(), "utf-8(replace)"
+    if text is None:
+        text, enc = data.decode("utf-8", "replace"), "utf-8(replace)"
+    return text.replace("\r\n", "\n").replace("\r", "\n"), enc, nl
+
+
+def read_txt(path):
+    text, enc, _nl = read_txt_ex(path)
+    return text, enc
+
+
+def write_txt(path, text, nl="\n"):
+    """按源文件的换行风格落盘。
+
+    关键在 newline=""：默认文本模式在 Windows 上会把每个 \n 翻成 \r\n，
+    导致"写的是 LF、盘上是 CRLF"，而校验若拿内存字符串比对就会假通过。
+    """
+    if nl and nl != "\n":
+        text = text.replace("\n", nl)
+    with open(path, "w", encoding="utf-8", newline="") as f:
+        f.write(text)
 
 
 PERSON_HEADERS = ("负责人", "责任人", "联系人", "姓名", "签名人", "经办人", "编制人",
@@ -1912,6 +2168,12 @@ RE_PART = re.compile(r"^word/(document|header\d*|footer\d*|footnotes|endnotes)\.
 RE_PARA = re.compile(r"<w:p\b[^>]*?(?:/>|>.*?</w:p>)", re.S)
 RE_T = re.compile(r"(<w:t(?:\s[^>]*)?>)(.*?)(</w:t>)", re.S)
 RE_T_SELF = re.compile(r"<w:t(\s[^>]*)?/>")
+# 文本框：w:txbxContent 里是自己的段落，而且整块嵌在正文段落内部。
+# 直接拿段落正则扫正文，会在内层 </w:p> 处提前收尾——文本框后面同一段的文字就漏了。
+RE_TXBX_TAG = re.compile(r"<w:txbxContent\b[^>]*?(/?)>|</w:txbxContent>")
+RE_TXBX_OPEN = re.compile(r"<w:txbxContent\b[^>]*>")
+RE_TXBX_CLOSE = "</w:txbxContent>"
+RE_TXBX_MASK = re.compile("\x00txbx(\\d+)\x00")
 RE_TBL = re.compile(r"<w:tbl>.*?</w:tbl>", re.S)
 RE_TR = re.compile(r"<w:tr\b[^>]*>.*?</w:tr>", re.S)
 RE_TC = re.compile(r"<w:tc\b[^>]*>.*?</w:tc>", re.S)
@@ -2114,14 +2376,104 @@ def _rebuild(block, pattern, fn):
     return "".join(out)
 
 
-def _scrub_para(block, mapper, cw, agg, ctx=None, strict_docid=False):
+def _scrub_para(block, mapper, cw, agg, ctx=None, strict_docid=False, loose=False):
     plain = _para_text(block)
     if not plain.strip():
         return block, 0
-    new, n = scrub(plain, mapper, cw, agg, ctx, strict_docid)
+    new, n = scrub(plain, mapper, cw, agg or loose, ctx, strict_docid)
     if not n:
         return block, 0
     return _set_para_text(block, new), n
+
+
+def _txbx_spans(xml):
+    """返回最外层 w:txbxContent 的 [(start, end)]。用栈配对，嵌套文本框也不会切错。"""
+    spans, stack = [], []
+    for m in RE_TXBX_TAG.finditer(xml):
+        if m.group(0).startswith("</"):
+            if stack:
+                s = stack.pop()
+                if not stack:
+                    spans.append((s, m.end()))
+        elif m.group(1) != "/":
+            stack.append(m.start())
+    return spans
+
+
+def _mask_txbx(xml, handler):
+    """把每个文本框整块换成无字符标记，交给 handler 单独处理。
+
+    handler 拿到的是文本框**内层**内容（去掉 w:txbxContent 外壳），
+    这样里面若还有嵌套文本框，会由下一次递归继续挖，不会自己套自己。
+    返回 (打了标记的 xml, 还原函数)。标记里没有 "<"，也不落在 <w:t> 里，
+    所以外层段落/表格的扫描既看不见它，也不会被它打乱。
+    """
+    spans = _txbx_spans(xml)
+    if not spans:
+        return xml, (lambda s: s)
+    parts, holders, last = [], [], 0
+    for s, e in spans:
+        seg = xml[s:e]
+        m = RE_TXBX_OPEN.match(seg)
+        inner = seg[m.end(): -len(RE_TXBX_CLOSE)]
+        parts.append(xml[last:s])
+        parts.append("\x00txbx%d\x00" % len(holders))
+        holders.append(m.group(0) + handler(inner) + RE_TXBX_CLOSE)
+        last = e
+    parts.append(xml[last:])
+    return "".join(parts), (lambda s: RE_TXBX_MASK.sub(
+        lambda m: holders[int(m.group(1))], s))
+
+
+def _walk_paras(xml, fn):
+    """按段落遍历（文本框单独递归），fn(match, index) 返回新片段。"""
+    masked, unmask = _mask_txbx(xml, lambda seg: _walk_paras(seg, fn))
+    return unmask(_rebuild(masked, RE_PARA, fn))
+
+
+def _paras_text(xml):
+    """按 _walk_paras 的顺序抽段落文本，用于整篇比对与残留扫描。"""
+    out = []
+
+    def take(m, _i):
+        out.append(_para_text(m.group(0)))
+        return m.group(0)
+
+    _walk_paras(xml, take)
+    return "\n".join(out)
+
+
+def _scrub_region(xml, mapper, cw, agg, ctx, acc, meta=None, aux=False, strict=False):
+    """表格 → 文本框 → 段落，一轮扫完一个部件（文本框递归调用自己）。
+
+    aux=True 表示这是页眉/页脚/脚注/尾注/文本框这类"短文本区"：
+    里面的名字常常孤立出现（"第 1 页 · 张建国"），没有"联系人："这类定位词，
+    所以这里放开孤立人名识别，否则扫到了也认不出。
+    """
+    def on_txbx(seg):
+        if meta is not None:
+            meta["textboxes"] += 1
+        return _scrub_region(seg, mapper, cw, agg, ctx, acc, meta, aux=True, strict=strict)
+
+    masked, unmask = _mask_txbx(xml, on_txbx)
+
+    out, last = [], 0
+    for m in RE_TBL.finditer(masked):
+        out.append(masked[last:m.start()])
+        body, n = _scrub_table(m.group(0), mapper, cw, agg, ctx)
+        acc[0] += n
+        out.append(body)
+        last = m.end()
+    out.append(masked[last:])
+    masked = "".join(out)
+
+    def on_para(m, _i):
+        block, n = _scrub_para(m.group(0), mapper, cw, agg, ctx,
+                               strict_docid=strict, loose=aux)
+        acc[0] += n
+        return block
+
+    return unmask(_rebuild(masked, RE_PARA, on_para))
 
 
 def _sub_first_para(cell, new):
@@ -2201,10 +2553,83 @@ def _scrub_table(tbl, mapper, cw, agg, ctx=None):
     return _rebuild(tbl, RE_TR, on_row), total[0]
 
 
+def _docx_propagate(work_xml, mapper, meta):
+    """整篇实体回填：正文里已经认定的实体，在页脚/脚注/文本框里原样出现也要替换。
+
+    识别靠上下文（"联系人：张建国"），页脚里的同一个名字却没有任何上下文。
+    第一轮扫完，映射表里已经有全部已认定实体，拿它把整篇再回填一遍，
+    既补上漏网，也保证同一实体全文只有一个占位符。
+
+    只回填长度 ≥3 且非"未分类"的实体：两个字的串（"李伟"）可能是另一个词的
+    前半截（"李伟民"），宁可留给第一轮的上下文规则判断。
+    """
+    pairs = {}
+    for (cat, raw), ph in mapper.forward.items():
+        r = raw.strip()
+        if cat == "未分类" or len(r) < 3 or "[" in r or "]" in r:
+            continue
+        pairs.setdefault(r, ph)
+    if not pairs:
+        return 0
+    rx = re.compile("|".join(re.escape(t) for t in sorted(pairs, key=len, reverse=True)))
+    added = [0]
+
+    def on_para(m, _i):
+        block = m.group(0)
+        t = _para_text(block)
+        if not t:
+            return block
+        hits = len(rx.findall(t))
+        if not hits:
+            return block
+        added[0] += hits
+        return _set_para_text(block, rx.sub(lambda mm: pairs[mm.group(0)], t))
+
+    for name in list(work_xml):
+        work_xml[name] = _walk_paras(work_xml[name], on_para)
+    meta["propagated"] += added[0]
+    return added[0]
+
+
+def _uncovered_parts(zin, names, dropped):
+    """列出"文字不在 w:t 里、这次没扫"的部件，报告里点名，不假装做过。"""
+    out = []
+    for n in names:
+        if n in dropped or RE_PART.match(n):
+            continue
+        if n.startswith("word/charts/") and n.endswith(".xml"):
+            kind = "图表（含数据标签/标题文字）"
+        elif n.startswith("word/diagrams/") and n.endswith(".xml"):
+            kind = "SmartArt 图形文字"
+        elif n.startswith("word/glossary/"):
+            kind = "自动图文集（构建基块）"
+        elif n.startswith("word/embeddings/"):
+            kind = "内嵌对象（Excel/Visio 等）"
+        elif n.startswith("customXml/") and n.endswith(".xml"):
+            kind = "自定义 XML 数据"
+        else:
+            continue
+        if n.endswith((".xlsx", ".bin", ".docx")):
+            out.append((n, kind, 0))
+            continue
+        try:
+            xml = zin.read(n).decode("utf-8", "replace")
+        except Exception:
+            out.append((n, kind, 0))
+            continue
+        cnt = len(re.findall(r"<a:t\b[^>]*>[^<]*</a:t>|<c:v\b[^>]*>[^<]*</c:v>"
+                             r"|<w:t\b[^>]*>[^<]*</w:t>", xml))
+        out.append((n, kind, cnt))
+    return out
+
+
 def _docx_transform(path, dest, mapper, cw, agg, stats, images="keep"):
     """打开 docx，清理元数据/批注/修订，再跑表格人名与段落脱敏，写回 dest。
 
     返回 (替换数, 原文, 脱敏后文本)。
+
+    覆盖：正文段落、表格、页眉、页脚、脚注、尾注、文本框（w:txbxContent）。
+    批注整份删除（含作者），图片按 images 处理。
 
     images: "keep" 原样保留图片（并在报告里列清单提示人工核对）；
             "strip" 删除 word/media 与正文里的图片节点，保证图里的文字不外泄。
@@ -2216,7 +2641,9 @@ def _docx_transform(path, dest, mapper, cw, agg, stats, images="keep"):
     dropped = set()
     meta = {"metadata_cleared": [], "comments_removed": 0, "revisions_accepted": 0,
             "hidden_text_revealed": 0, "custom_props_removed": 0,
-            "track_revisions_removed": 0, "dropped_parts": []}
+            "track_revisions_removed": 0, "dropped_parts": [],
+            "text_parts": [], "aux_parts": [], "textboxes": 0,
+            "propagated": 0, "uncovered": []}
 
     with zipfile.ZipFile(path) as zin:
         names = zin.namelist()
@@ -2283,13 +2710,16 @@ def _docx_transform(path, dest, mapper, cw, agg, stats, images="keep"):
             except UnicodeDecodeError:
                 stats.setdefault("warn_enc", []).append(path)
         ctx = DocContext("\n".join(
-            _para_text(m.group(0))
-            for xml in part_xml.values() for m in RE_PARA.finditer(xml)))
+            _paras_text(xml) for xml in part_xml.values()))
 
-        # ---- 三、正文脱敏 ----
+        # ---- 三、各部件脱敏 ----
+        # 页眉/页脚/脚注/尾注是独立部件，文本框嵌在正文里，都走同一套扫描。
+        # 批注（word/comments.xml）暂不纳入：加进去会让整包处理整体失效（2026-11-15 实测替换数变 0），
+        # 待单独摸清后再上；报告里已把它列为「未覆盖」。
+        AUX_PREFIX = ("word/header", "word/footer", "word/footnotes", "word/endnotes")
+        work_xml = {}
         for name, xml in part_xml.items():
-            src_text = "\n".join(_para_text(m.group(0)) for m in RE_PARA.finditer(xml))
-            orig_chunks.append(src_text)
+            orig_chunks.append(_paras_text(xml))
 
             work, k = _accept_revisions(xml)
             meta["revisions_accepted"] += k
@@ -2297,36 +2727,32 @@ def _docx_transform(path, dest, mapper, cw, agg, stats, images="keep"):
             meta["hidden_text_revealed"] += k
             work = RE_COMMENT_REF.sub("", work)
 
-            out = []
-            last = 0
-            for m in RE_TBL.finditer(work):
-                out.append(work[last:m.start()])
-                body, n = _scrub_table(m.group(0), mapper, cw, agg, ctx)
-                total += n
-                out.append(body)
-                last = m.end()
-            out.append(work[last:])
-            work = "".join(out)
-
-            # 页眉/页脚只有编号本身，没有"编号"二字，按形态直接保护
+            aux = name.startswith(AUX_PREFIX)
             strict = name.startswith(("word/header", "word/footer"))
+            acc = [0]
+            work = _scrub_region(work, mapper, cw, agg, ctx, acc, meta,
+                                 aux=aux, strict=strict)
+            total += acc[0]
+            work_xml[name] = work
+            meta["text_parts"].append(name)
+            if aux:
+                meta["aux_parts"].append(name)
 
-            def on_para(m, _i):
-                nonlocal total
-                block, n = _scrub_para(m.group(0), mapper, cw, agg, ctx, strict)
-                total += n
-                return block
+        # ---- 三·二、整篇实体回填 ----
+        total += _docx_propagate(work_xml, mapper, meta)
 
-            work = _rebuild(work, RE_PARA, on_para)
+        meta["uncovered"] = _uncovered_parts(zin, names, dropped)
+
+        for name, work in work_xml.items():
             if images == "strip":
                 # 图片是二进制，文字脱敏碰不到；整块删掉引用与文件，
                 # 宁可让客户自己重画，也不把截图里的 IP 和系统名带出去。
+                # 注意：文本框通常挂在图片/形状上，这一模式会把文本框一起删掉。
                 work = RE_DRAWING.sub("", work)
                 work = RE_PICT.sub("", work)
-            if work != xml:
+            if work != part_xml[name]:
                 changed[name] = work
-            new_chunks.append("\n".join(_para_text(m.group(0))
-                                         for m in RE_PARA.finditer(work)))
+            new_chunks.append(_paras_text(work))
 
         tmp = dest + ".tmp"
         with zipfile.ZipFile(tmp, "w", zipfile.ZIP_DEFLATED) as zout:
@@ -2343,6 +2769,8 @@ def _docx_transform(path, dest, mapper, cw, agg, stats, images="keep"):
 
     meta["dropped_parts"] = sorted(dropped)
     meta["metadata_cleared"] = sorted(set(meta["metadata_cleared"]))
+    if meta["uncovered"]:
+        stats.setdefault("uncovered", []).append((path, meta["uncovered"]))
     stats.setdefault("meta", []).append((path, meta))
     return total, "\n".join(orig_chunks), "\n".join(new_chunks)
 
@@ -2373,7 +2801,7 @@ def docx_restore_file(src, dest, pairs):
                     u = u.replace(ph, orig)
                 return _set_para_text(block, u) if u != t else block
 
-            work = _rebuild(xml, RE_PARA, rp)
+            work = _walk_paras(xml, rp)
             if work != xml:
                 changed[name] = work
         with zipfile.ZipFile(dest, "w", zipfile.ZIP_DEFLATED) as zout:
@@ -2386,9 +2814,9 @@ def docx_restore_file(src, dest, pairs):
 
 
 def process_plain(path, mapper, custom_words, aggressive):
-    text, enc = read_txt(path)
+    text, enc, nl = read_txt_ex(path)
     new, n = scrub(text, mapper, custom_words, aggressive)
-    return new, n, text
+    return new, n, text, nl
 
 
 def gather_files(target):
@@ -2400,6 +2828,173 @@ def gather_files(target):
             if n.lower().endswith((".txt", ".md", ".csv", ".docx")) and not n.startswith("~$"):
                 files.append(os.path.join(root, n))
     return sorted(files)
+
+
+# ---------------------------------------------------------------- 还原校验
+# 还原只证明"占位符被换掉了"，不证明"换回来的是原文"。映射表被改一条、
+# 或原文在脱敏后又被改过，都会静默产出错误结果。这里把还原结果与原始文件
+# 逐字比对：一致才叫成功，不一致指出第一处差异和前后各 20 字上下文。
+
+_SCRUB_SUFFIXES = ("_脱敏", "_desens", "_scrubbed")
+
+
+def _sha256_file(path):
+    h = hashlib.sha256()
+    with open(path, "rb") as fh:
+        for chunk in iter(lambda: fh.read(1 << 20), b""):
+            h.update(chunk)
+    return h.hexdigest()
+
+
+def _source_stem(name):
+    stem, ext = os.path.splitext(name)
+    for suf in _SCRUB_SUFFIXES:
+        if stem.endswith(suf):
+            stem = stem[:-len(suf)]
+            break
+    return stem, ext
+
+
+def _find_source(path, sources):
+    """按脱敏文件名反查映射表里记录的原始文件。"""
+    want = "".join(_source_stem(os.path.basename(path)))
+    for s in sources:
+        if s.get("name") == want:
+            return s
+    for s in sources:
+        if os.path.basename(s.get("path", "")) == want:
+            return s
+    return None
+
+
+def _restore_original_path(path, source):
+    """找原始文件：优先映射表记录的绝对路径，其次脱敏文件旁边的同名文件。"""
+    stem, ext = _source_stem(os.path.basename(path))
+    cands = []
+    if source and source.get("path"):
+        cands.append(source["path"])
+    cands.append(os.path.join(os.path.dirname(os.path.abspath(path)), stem + ext))
+    me = os.path.abspath(path)
+    for c in cands:
+        if c and os.path.abspath(c) != me and os.path.isfile(c):
+            return c
+    return None
+
+
+def _safe_orig_newline(path, source):
+    """原始文件的换行风格；指纹对不上或读不到就返回 None（不猜）。"""
+    if not path:
+        return None
+    if source and source.get("sha256"):
+        try:
+            if _sha256_file(path) != source["sha256"]:
+                return None
+        except OSError:
+            return None
+    try:
+        with open(path, "rb") as f:
+            return _detect_newline(f.read())
+    except OSError:
+        return None
+
+
+def _docx_compare_text(path, normalize=False):
+    """按脱敏时同一套段落规则抽 docx 文本。
+
+    normalize=True 用于原始文件：先接受修订、去掉隐藏标记、清批注引用，
+    与脱敏引擎当时看到的文本对齐，避免"修订被接受"被误报成还原失败。
+    """
+    import zipfile
+    chunks = []
+    with zipfile.ZipFile(path) as z:
+        for name in z.namelist():
+            if not RE_PART.match(name):
+                continue
+            xml = z.read(name).decode("utf-8", "replace")
+            if normalize:
+                xml, _ = _accept_revisions(xml)
+                xml, _ = _strip_vanish(xml)
+                xml = RE_COMMENT_REF.sub("", xml)
+            chunks.append(_paras_text(xml))
+    return "\n".join(chunks)
+
+
+def _normalize_eol(text):
+    """比对前统一换行：CRLF/CR 都折成 LF，行尾风格不计入差异。"""
+    return text.replace("\r\n", "\n").replace("\r", "\n")
+
+
+def _read_text_norm(path):
+    """按字节读回文件再统一换行，用于校验真正落盘的内容。"""
+    with open(path, "rb") as f:
+        data = f.read()
+    for enc in ("utf-8", "utf-8-sig", "gbk", "cp936"):
+        try:
+            return _normalize_eol(data.decode(enc))
+        except UnicodeDecodeError:
+            continue
+    return _normalize_eol(data.decode("utf-8", "replace"))
+
+
+def _diff_ctx(text, pos, span=20):
+    lo, hi = max(0, pos - span), min(len(text), pos + span)
+    frag = text[lo:hi].replace("\r", "\\r").replace("\n", "\\n").replace("\t", "\\t")
+    return ("…%s…" % frag) if (lo > 0 or hi < len(text)) else frag
+
+
+def _compare_text(orig, restored, label):
+    if orig == restored:
+        print("  [校验] %s：还原成功，与原始文件逐字一致（%d 字）" % (label, len(orig)))
+        return True
+    n = min(len(orig), len(restored))
+    i = 0
+    while i < n and orig[i] == restored[i]:
+        i += 1
+    line = orig.count("\n", 0, i) + 1
+    col = i - orig.rfind("\n", 0, i)
+    print("  [校验失败] %s：第 %d 行第 %d 列（全文第 %d 个字符）起与原始文件不一致"
+          % (label, line, col, i + 1))
+    print("    原文：%s" % _diff_ctx(orig, i))
+    print("    还原：%s" % _diff_ctx(restored, i))
+    if len(orig) != len(restored):
+        print("    长度：原文 %d 字，还原 %d 字" % (len(orig), len(restored)))
+    return False
+
+
+def _verify_restore(path, dest, ext, source):
+    """校验真正写出去的文件：重新读回 dest，再与原始文件比对。
+
+    返回 True/False；无法比对时返回 None（不谎报成功）。
+    比对前统一 \r\n→\n，行尾风格不计入差异；内容有任何一处不同都算失败。
+    """
+    label = os.path.basename(path)
+    if not os.path.isfile(dest):
+        print("  [校验失败] %s：目标文件没有落盘，无法校验" % label)
+        return False
+    orig_path = _restore_original_path(path, source)
+    if not orig_path:
+        print("  [校验跳过] %s：找不到原始文件，无法逐字比对" % label)
+        return None
+    if source and source.get("sha256"):
+        try:
+            if _sha256_file(orig_path) != source["sha256"]:
+                print("  [校验跳过] %s：同名文件指纹不符（%s），不敢当原文比对"
+                      % (label, orig_path))
+                return None
+        except OSError as e:
+            print("  [校验跳过] %s：读不到原始文件（%s）" % (label, e))
+            return None
+    try:
+        if ext == ".docx":
+            orig_text = _normalize_eol(_docx_compare_text(orig_path, normalize=True))
+            restored_text = _normalize_eol(_docx_compare_text(dest, normalize=False))
+        else:
+            orig_text = _read_text_norm(orig_path)
+            restored_text = _read_text_norm(dest)
+    except Exception as e:
+        print("  [校验跳过] %s：读取失败（%s）" % (label, e))
+        return None
+    return _compare_text(orig_text, restored_text, label)
 
 
 # ---------------------------------------------------------------- 主流程
@@ -2436,6 +3031,7 @@ def run_scrub(args):
     mapper = Mapper()
     stats = {"warn_no_run": [], "warn_enc": [], "files": [], "risks": [],
              "readability": [], "media": []}
+    sources = []
     images_mode = getattr(args, "images", "keep")
 
     for f in files:
@@ -2448,13 +3044,18 @@ def run_scrub(args):
                 n, orig_text, new_text = process_docx(
                     f, dest, mapper, custom_words, args.aggressive, stats, images_mode)
             else:
-                new_text, n, orig_text = process_plain(f, mapper, custom_words, args.aggressive)
-                with open(dest, "w", encoding="utf-8") as fh:
-                    fh.write(new_text)
+                new_text, n, orig_text, nl = process_plain(
+                    f, mapper, custom_words, args.aggressive)
+                write_txt(dest, new_text, nl)
         except Exception as e:
             print("  [失败] %s : %s" % (base, e))
             continue
         stats["files"].append((base, os.path.basename(dest), n))
+        try:
+            sources.append({"name": base, "path": os.path.abspath(f),
+                            "sha256": _sha256_file(f)})
+        except OSError:
+            pass
         for item in risk_scan(orig_text, new_text):
             stats["risks"].append((base,) + item)
         for item in readability_scan(new_text):
@@ -2464,7 +3065,7 @@ def run_scrub(args):
     # 映射表
     mapfile = os.path.join(outdir, "映射表_%s.json" % stamp)
     with open(mapfile, "w", encoding="utf-8") as fh:
-        json.dump(mapper.dump(map_pwd), fh, ensure_ascii=False, indent=2)
+        json.dump(mapper.dump(map_pwd, sources=sources), fh, ensure_ascii=False, indent=2)
 
     # 报告（不含原文）
     report = os.path.join(outdir, "脱敏报告_%s.md" % stamp)
@@ -2522,8 +3123,41 @@ def run_scrub(args):
             fh.write("| 修订跟踪 | %s |\n"
                      % ("已关闭" if any(m["track_revisions_removed"] for m in metas)
                         else "未开启"))
+            covered = sorted({p for m in metas for p in m.get("text_parts", [])})
+            if covered:
+                fh.write("| 已扫文字部件 | %s |\n"
+                         % "、".join("`%s`" % c for c in covered))
+            aux = sorted({p for m in metas for p in m.get("aux_parts", [])})
+            if aux:
+                fh.write("| 页眉页脚脚注尾注 | %s（孤立人名按形态加强识别） |\n"
+                         % "、".join("`%s`" % c for c in aux))
+            n_txbx = sum(m.get("textboxes", 0) for m in metas)
+            if n_txbx:
+                fh.write("| 文本框（`w:txbxContent`） | 扫到 %d 处，文字已脱敏 |\n" % n_txbx)
+            n_prop = sum(m.get("propagated", 0) for m in metas)
+            if n_prop:
+                fh.write("| 整篇实体回填 | 补充替换 %d 处（页脚/脚注里孤立出现的既有实体） |\n"
+                         % n_prop)
         else:
             fh.write("本批没有 .docx，无需处理。\n")
+
+        # 文字不在 <w:t> 里的部位：只点名，不假装做过
+        fh.write("\n## 五·补充、本次没有覆盖的部位\n\n")
+        unc = [(os.path.basename(p), part, kind, cnt)
+               for p, items in stats.get("uncovered", []) for part, kind, cnt in items]
+        if unc:
+            fh.write("下面这些部件里也有文字，但**不在本次脱敏范围内**，需要人工处理：\n\n")
+            fh.write("| 文件 | 部件 | 类型 | 文字条数 |\n|---|---|---|---|\n")
+            for base, part, kind, cnt in unc[:60]:
+                fh.write("| %s | `%s` | %s | %s |\n"
+                         % (base, part, kind, cnt if cnt else "—"))
+            if len(unc) > 60:
+                fh.write("\n（另有 %d 项未列出）\n" % (len(unc) - 60))
+        else:
+            fh.write("未发现图表/SmartArt/内嵌对象等未覆盖部件。\n")
+        fh.write("\n> 一律不覆盖：图片里的字（见第六节）、域代码（`w:instrText`）、"
+                 "艺术字/DrawingML 形状里的文字（`a:t`）。\n"
+                 "> 批注是整份删除的：文字与作者一起消失，敏感词不会残留，但批注本身也还原不回来。\n")
 
         fh.write("\n## 六、图片（文本脱敏碰不到，必须人工处理）\n\n")
         if stats["media"]:
@@ -2589,19 +3223,34 @@ def run_restore(args):
         return 1
     pairs = sorted(((p["placeholder"], p["original"]) for p in data["pairs"]),
                    key=lambda x: -len(x[0]))
+    sources = data.get("sources") or []
     files = gather_files(args.target)
+    # 显式给了 -o 就写进去；没给才回落到输入文件所在目录。
+    outdir = getattr(args, "out", None)
+    if outdir:
+        os.makedirs(outdir, exist_ok=True)
+    failed = 0
     for f in files:
         name, ext = os.path.splitext(os.path.basename(f))
-        dest = os.path.join(os.path.dirname(os.path.abspath(f)), "%s_还原%s" % (name, ext))
+        dest_dir = outdir if outdir else os.path.dirname(os.path.abspath(f))
+        dest = os.path.join(dest_dir, "%s_还原%s" % (name, ext))
+        source = _find_source(f, sources)
         if ext.lower() == ".docx":
             docx_restore_file(f, dest, pairs)
         else:
-            text, _ = read_txt(f)
+            text, _enc, nl = read_txt_ex(f)
             for ph, orig in pairs:
                 text = text.replace(ph, orig)
-            with open(dest, "w", encoding="utf-8") as fh:
-                fh.write(text)
+            # 还原件要和原始文件同一种换行，版本比对才不会"全文都变了"。
+            nl = _safe_orig_newline(_restore_original_path(f, source), source) or nl
+            write_txt(dest, text, nl)
         print("  [还原] %s -> %s" % (os.path.basename(f), os.path.basename(dest)))
+        if _verify_restore(f, dest, ext.lower(), source) is False:
+            failed += 1
+    if failed:
+        print("\n[注意] %d 个文件的还原结果与原始文件不一致，见上面的 [校验失败]。"
+              % failed)
+        return 3
     return 0
 
 
