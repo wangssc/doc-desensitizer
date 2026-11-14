@@ -5,6 +5,15 @@
 
 纯本地运行。不联网、不上传、不需要账号。
 
+## 直接下载（不用装 Python）
+
+[**DesensTool-v2-win64.zip**](release/DesensTool-v2-win64.zip) — 18.8 MB，Windows 10/11 解压即用。
+
+里面是：`DesensTool.exe`（整份文件）、`DesensClip.exe`（剪贴板守护）、`使用说明.txt`、`敏感名单.txt`。
+解压到任意目录，双击即可，不需要管理员权限。
+
+想自己从源码跑或重新打包，见下面「怎么用」。
+
 ---
 
 ## 它做什么
